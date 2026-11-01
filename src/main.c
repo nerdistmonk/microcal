@@ -40,6 +40,14 @@ int main(void) {
         ch = getch();
 
         switch (ch) {
+        case KEY_RESIZE:
+            break;
+
+        case 'f':
+        case 'F':
+            ui_toggle_details();
+            break;
+
         case KEY_UP:
             if (cal.selected_day > 7) {
                 cal.selected_day -= 7;
@@ -88,8 +96,8 @@ int main(void) {
         case KEY_ENTER:
         case 'v':
         case 'V': {
-            Event* day_events[16];
-            int count = calendar_get_events_for_day(&cal, cal.current_year, cal.current_month, cal.selected_day, day_events, 16);
+            Event* day_events[MAX_DAY_EVENTS];
+            int count = calendar_get_events_for_day(&cal, cal.current_year, cal.current_month, cal.selected_day, day_events, MAX_DAY_EVENTS);
             int del_id = ui_show_day_events(&cal, day_events, count);
             if (del_id > 0) {
                 if (calendar_delete_event(&cal, del_id)) {
@@ -128,10 +136,13 @@ int main(void) {
         case KEY_F(1):
             ui_show_message("Help & Keyguide",
                 "Arrow Keys: Navigate days\n"
+                "Mouse Click / Double-Click: Select day / View events\n"
+                "Mouse Scroll: Previous / Next month\n"
                 "PageUp/PageDown: Switch month\n"
                 "Enter / v: View and delete events on selected day\n"
                 "e: Add event on selected day\n"
                 "s: Save / Export to ICS\n"
+                "f: Toggle expanded event details (Type/Tags)\n"
                 "F2: Import ICS file\n"
                 "F3: Export ICS file\n"
                 "t: Cycle color theme\n"
@@ -174,10 +185,51 @@ int main(void) {
         case 'Q':
             running = false;
             break;
+
         case KEY_MOUSE: {
             MEVENT event;
             if (getmouse(&event) == OK) {
-                // Mouse handling hook
+                #if defined(BUTTON4_PRESSED) || defined(BUTTON5_PRESSED)
+                if (event.bstate & BUTTON4_PRESSED) {
+                    cal.current_month--;
+                    if (cal.current_month < 1) {
+                        cal.current_month = 12;
+                        cal.current_year--;
+                    }
+                    if (cal.selected_day > days_in_month(cal.current_year, cal.current_month)) {
+                        cal.selected_day = days_in_month(cal.current_year, cal.current_month);
+                    }
+                    break;
+                } else if (event.bstate & BUTTON5_PRESSED) {
+                    cal.current_month++;
+                    if (cal.current_month > 12) {
+                        cal.current_month = 1;
+                        cal.current_year++;
+                    }
+                    if (cal.selected_day > days_in_month(cal.current_year, cal.current_month)) {
+                        cal.selected_day = days_in_month(cal.current_year, cal.current_month);
+                    }
+                    break;
+                }
+                #endif
+
+                if (event.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED)) {
+                    int clicked_day = ui_get_day_at_coords(&cal, event.y, event.x);
+                    if (clicked_day > 0) {
+                        cal.selected_day = clicked_day;
+
+                        if (event.bstate & BUTTON1_DOUBLE_CLICKED) {
+                            Event* day_events[MAX_DAY_EVENTS];
+                            int count = calendar_get_events_for_day(&cal, cal.current_year, cal.current_month, cal.selected_day, day_events, MAX_DAY_EVENTS);
+                            int del_id = ui_show_day_events(&cal, day_events, count);
+                            if (del_id > 0) {
+                                if (calendar_delete_event(&cal, del_id)) {
+                                    ui_show_message("Deleted", "Event was deleted successfully.");
+                                }
+                            }
+                        }
+                    }
+                }
             }
             break;
         }

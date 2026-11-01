@@ -3,6 +3,12 @@
 #include <stdlib.h>
 #include <time.h>
 
+#define MIN_PANEL_COLS 92
+#define MIN_PANEL_LINES 16
+#define CAL_PANE_WIDTH 58
+
+static bool g_detailed_view = false;
+
 void ui_init(void) {
     initscr();
     cbreak();
@@ -19,6 +25,14 @@ void ui_init(void) {
 
 void ui_cleanup(void) {
     endwin();
+}
+
+void ui_toggle_details(void) {
+    g_detailed_view = !g_detailed_view;
+}
+
+bool ui_is_details_enabled(void) {
+    return g_detailed_view;
 }
 
 void ui_set_theme(ColorTheme theme) {
@@ -72,10 +86,26 @@ void ui_draw_header(const CalendarState* cal) {
     attroff(COLOR_PAIR(1));
 }
 
-void ui_draw_grid(const CalendarState* cal) {
-    attron(COLOR_PAIR(2));
-    // Each column is exactly 7 characters wide: 3-char name + 4 spacing/divider chars
-    mvprintw(3, 2, "  Sun  |  Mon  |  Tue  |  Wed  |  Thu  |  Fri  |  Sat  ");
+void ui_draw_status_bar(void) {
+    int max_y, max_x;
+    getmaxyx(stdscr, max_y, max_x);
+
+    attron(COLOR_PAIR(4));
+    mvprintw(max_y - 1, 0, "%-*s", max_x, " F1:Help ENTER:View e:Add s:Save F2:Import F3:Export f:Details t:Theme q:Quit");
+    attroff(COLOR_PAIR(4));
+}
+
+static void draw_calendar_grid_window(WINDOW* win, const CalendarState* cal, int win_w, int win_h) {
+    wattron(win, COLOR_PAIR(2));
+    box(win, 0, 0);
+
+    const int col_width = 8;
+    const int grid_w = 7 * col_width;
+    int start_col = (win_w - grid_w) / 2;
+    if (start_col < 1) start_col = 1;
+
+    mvwprintw(win, 1, start_col, "  Sun  |  Mon  |  Tue  |  Wed  |  Thu  |  Fri  |  Sat  ");
+    mvwhline(win, 2, 1, ACS_HLINE, win_w - 2);
 
     time_t raw_time = time(NULL);
     struct tm* tm_now = localtime(&raw_time);
@@ -83,26 +113,24 @@ void ui_draw_grid(const CalendarState* cal) {
     int real_month = tm_now ? tm_now->tm_mon + 1 : 0;
     int real_day = tm_now ? tm_now->tm_mday : 0;
 
-    int start_row = 5;
-    int start_col = 2;
-    const int col_width = 8; // "  Sun  |" is 8 characters with divider
-
     int total_days = days_in_month(cal->current_year, cal->current_month);
     int first_day_wday = get_day_of_week(cal->current_year, cal->current_month, 1);
 
-    int row = start_row;
+    int row = 4;
     int col = start_col + (first_day_wday * col_width);
 
     for (int day = 1; day <= total_days; day++) {
+        if (row >= win_h - 1) break;
+
         bool is_today = (cal->current_year == real_year &&
                          cal->current_month == real_month &&
                          day == real_day);
         bool is_cursor = (day == cal->selected_day);
 
         if (is_cursor) {
-            attron(COLOR_PAIR(5) | A_BOLD);
+            wattron(win, COLOR_PAIR(5) | A_BOLD);
         } else if (is_today) {
-            attron(COLOR_PAIR(3) | A_BOLD);
+            wattron(win, COLOR_PAIR(3) | A_BOLD);
         }
 
         bool has_events = false;
@@ -115,17 +143,16 @@ void ui_draw_grid(const CalendarState* cal) {
             curr = curr->next;
         }
 
-        // Print centered under each 7-char day name (column slot)
         if (has_events) {
-            mvprintw(row, col, " [%02d*] ", day);
+            mvwprintw(win, row, col, " [%02d*] ", day);
         } else {
-            mvprintw(row, col, "  %02d   ", day);
+            mvwprintw(win, row, col, "  %02d   ", day);
         }
 
         if (is_cursor) {
-            attroff(COLOR_PAIR(5) | A_BOLD);
+            wattroff(win, COLOR_PAIR(5) | A_BOLD);
         } else if (is_today) {
-            attroff(COLOR_PAIR(3) | A_BOLD);
+            wattroff(win, COLOR_PAIR(3) | A_BOLD);
         }
 
         col += col_width;
@@ -134,24 +161,131 @@ void ui_draw_grid(const CalendarState* cal) {
             row += 2;
         }
     }
-    attroff(COLOR_PAIR(2));
+    wattroff(win, COLOR_PAIR(2));
 }
 
-void ui_draw_status_bar(void) {
-    int max_y, max_x;
-    getmaxyx(stdscr, max_y, max_x);
+static void draw_side_event_panel(WINDOW* win, const CalendarState* cal, int win_w, int win_h) {
+    wattron(win, COLOR_PAIR(2));
+    box(win, 0, 0);
 
-    attron(COLOR_PAIR(4));
-    mvprintw(max_y - 1, 0, "%-*s", max_x, " F1:Help ENTER:View/Del e:Add s:Save F2:Import F3:Export t:Theme q:Quit");
-    attroff(COLOR_PAIR(4));
+    char title_buf[64];
+    snprintf(title_buf, sizeof(title_buf), " Events for %04d-%02d-%02d %s",
+             cal->current_year, cal->current_month, cal->selected_day,
+             g_detailed_view ? "[Expanded]" : "");
+    wattron(win, A_BOLD);
+    mvwprintw(win, 1, 2, "%-*.*s", win_w - 4, win_w - 4, title_buf);
+    wattroff(win, A_BOLD);
+    mvwhline(win, 2, 1, ACS_HLINE, win_w - 2);
+
+    Event* day_events[MAX_DAY_EVENTS];
+    int count = calendar_get_events_for_day(cal, cal->current_year, cal->current_month, cal->selected_day, day_events, MAX_DAY_EVENTS);
+
+    if (count == 0) {
+        mvwprintw(win, 4, 3, "No events scheduled.");
+        mvwprintw(win, 5, 3, "Press 'e' to add one.");
+    } else {
+        int cur_line = 3;
+        int max_w = win_w - 4;
+
+        for (int i = 0; i < count; i++) {
+            if (cur_line >= win_h - 2) {
+                mvwprintw(win, win_h - 2, 2, "[More events hidden...]");
+                break;
+            }
+
+            char item_line[MAX_TITLE_LEN + 16];
+            snprintf(item_line, sizeof(item_line), "- %s", day_events[i]->title);
+
+            wattron(win, COLOR_PAIR(1) | A_BOLD);
+            mvwprintw(win, cur_line++, 2, "%-*.*s", max_w, max_w, item_line);
+            wattroff(win, COLOR_PAIR(1) | A_BOLD);
+
+            if (g_detailed_view && strlen(day_events[i]->category) > 0 && cur_line < win_h - 2) {
+                mvwprintw(win, cur_line++, 4, "Type: %-*.*s", max_w - 8, max_w - 8, day_events[i]->category);
+            }
+
+            if (strlen(day_events[i]->description) > 0) {
+                const char* p = day_events[i]->description;
+                while (*p && cur_line < win_h - 2) {
+                    char desc_buf[MAX_DESC_LEN];
+                    const char* next_nl = strchr(p, '\n');
+                    size_t seg_len = next_nl ? (size_t)(next_nl - p) : strlen(p);
+                    if (seg_len >= sizeof(desc_buf)) seg_len = sizeof(desc_buf) - 1;
+                    strncpy(desc_buf, p, seg_len);
+                    desc_buf[seg_len] = '\0';
+
+                    mvwprintw(win, cur_line++, 4, "%-*.*s", max_w - 4, max_w - 4, desc_buf);
+
+                    if (!next_nl) break;
+                    p = next_nl + 1;
+                }
+            }
+
+            cur_line++;
+        }
+    }
+    wattroff(win, COLOR_PAIR(2));
 }
 
 void ui_refresh_all(const CalendarState* cal) {
     clear();
     ui_draw_header(cal);
-    ui_draw_grid(cal);
     ui_draw_status_bar();
     refresh();
+
+    int usable_lines = LINES - 3;
+    if (usable_lines < 8) usable_lines = 8;
+
+    if (COLS >= MIN_PANEL_COLS && LINES >= MIN_PANEL_LINES) {
+        int cal_w = CAL_PANE_WIDTH;
+        int panel_w = COLS - cal_w - 1;
+
+        WINDOW* cal_win = newwin(usable_lines, cal_w, 2, 0);
+        WINDOW* panel_win = newwin(usable_lines, panel_w, 2, cal_w);
+
+        if (cal_win && panel_win) {
+            draw_calendar_grid_window(cal_win, cal, cal_w, usable_lines);
+            draw_side_event_panel(panel_win, cal, panel_w, usable_lines);
+            wrefresh(cal_win);
+            wrefresh(panel_win);
+            delwin(cal_win);
+            delwin(panel_win);
+        }
+    } else {
+        WINDOW* cal_win = newwin(usable_lines, COLS, 2, 0);
+        if (cal_win) {
+            draw_calendar_grid_window(cal_win, cal, COLS, usable_lines);
+            wrefresh(cal_win);
+            delwin(cal_win);
+        }
+    }
+}
+
+int ui_get_day_at_coords(const CalendarState* cal, int my, int mx) {
+    int total_days = days_in_month(cal->current_year, cal->current_month);
+    int first_day_wday = get_day_of_week(cal->current_year, cal->current_month, 1);
+
+    int win_w = (COLS >= MIN_PANEL_COLS && LINES >= MIN_PANEL_LINES) ? CAL_PANE_WIDTH : COLS;
+    const int col_width = 8;
+    const int grid_w = 7 * col_width;
+    int start_col = (win_w - grid_w) / 2;
+    if (start_col < 1) start_col = 1;
+
+    int row = 6;
+    int col = start_col + (first_day_wday * col_width);
+
+    for (int day = 1; day <= total_days; day++) {
+        if (my == row && mx >= col && mx < col + col_width) {
+            return day;
+        }
+
+        col += col_width;
+        if ((first_day_wday + day) % 7 == 0) {
+            col = start_col;
+            row += 2;
+        }
+    }
+    return -1;
 }
 
 void ui_show_message(const char* title, const char* message) {
@@ -301,7 +435,7 @@ int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
         box(win, 0, 0);
         mvwprintw(win, 1, 2, "%s", header);
 
-        int item_start_y[16];
+        int item_start_y[MAX_DAY_EVENTS];
         int curr_y = 0;
         for (int i = 0; i < count; i++) {
             item_start_y[i] = curr_y;
@@ -322,8 +456,7 @@ int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
 
             if (base_screen_y >= 2 && base_screen_y < win_h - 2) {
                 if (i == selected_idx) wattron(win, A_REVERSE | A_BOLD);
-                mvwprintw(win, base_screen_y, 2, "#%d: %-*.*s", events[i]->id,
-                          max_text_w - 6, max_text_w - 6, events[i]->title);
+                mvwprintw(win, base_screen_y, 3, "%-*.*s", max_text_w - 3, max_text_w - 3, events[i]->title);
                 if (i == selected_idx) wattroff(win, A_REVERSE | A_BOLD);
             }
 
@@ -340,7 +473,7 @@ int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
 
                     int desc_y = base_screen_y + 1 + desc_line_idx;
                     if (desc_y >= 2 && desc_y < win_h - 2) {
-                        mvwprintw(win, desc_y, 4, "  %-*.*s", max_text_w - 4, max_text_w - 4, desc_buf);
+                        mvwprintw(win, desc_y, 5, "%-*.*s", max_text_w - 5, max_text_w - 5, desc_buf);
                     }
 
                     desc_line_idx++;

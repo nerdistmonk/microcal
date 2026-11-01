@@ -8,6 +8,7 @@
 #define MAX_UID_LEN 128
 #define MAX_CATEGORY_LEN 64
 #define MAX_TIMESTAMP_LEN 32
+#define MAX_DAY_EVENTS 64
 
 typedef enum {
     RECUR_NONE = 0,
@@ -19,11 +20,11 @@ typedef enum {
 
 typedef struct {
     RecurrenceType type;
-    int interval;          // e.g. every 1 week, every 3 months, every 6 months (default 1)
-    int day_of_month;      // 1-31 (0 if not explicitly specified)
-    int month_of_year;     // 1-12 (0 if not explicitly specified)
-    int day_of_week_mask;  // Bitmask for weekly: bit 0 = Sunday, 1 = Monday, ... 6 = Saturday
-    int wkst;              // 0 = Sunday, 1 = Monday, -1 = unspecified
+    int interval; // e.g. every 1 week, every 2 weeks, every 3 months (default 1)
+    int day_of_month; // 1-31 (0 if not explicitly specified)
+    int month_of_year; // 1-12 (0 if not explicitly specified)
+    int day_of_week_mask; // Bitmask for weekly: bit 0 = Sunday, 1 = Monday, ... 6 = Saturday
+    int wkst; // 0 = Sunday, 1 = Monday, -1 = unspecified
 } RecurrenceRule;
 
 typedef struct Event {
@@ -35,12 +36,12 @@ typedef struct Event {
     char category[MAX_CATEGORY_LEN];
     int year;
     int month; // 1-12
-    int day;   // 1-31
+    int day; // 1-31
     int end_year;
     int end_month;
     int end_day;
     bool is_transparent; // TRANSP:TRANSPARENT vs OPAQUE
-    int sequence;        // SEQUENCE
+    int sequence; // SEQUENCE
     bool is_recurring;
     RecurrenceRule recurrence;
     struct Event* next;

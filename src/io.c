@@ -145,6 +145,13 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
             }
             else if (strcmp(line, "END:VEVENT") == 0) {
                 if (in_event) {
+                    // RFC 5545 §3.3.10: If FREQ=WEEKLY has no BYDAY, default to DTSTART weekday.
+                    // Evaluated here so start_y/m/d is guaranteed fully parsed regardless of line ordering.
+                    if (is_recurring && rule.type == RECUR_WEEKLY && rule.day_of_week_mask == 0) {
+                        int def_wday = get_day_of_week(start_y, start_m, start_d);
+                        rule.day_of_week_mask = (1 << def_wday);
+                    }
+
                     calendar_add_event_full(cal, uid, dtstamp, title, desc, cat,
                                             start_y, start_m, start_d,
                                             end_y ? end_y : start_y,
@@ -393,7 +400,11 @@ bool calendar_export_ics(const CalendarState* cal, const char* filepath) {
                         break;
                     }
                 }
-                fprintf(file, "RRULE:FREQ=WEEKLY;BYDAY=%s", wday_names[w]);
+                fprintf(file, "RRULE:FREQ=WEEKLY");
+                if (current->recurrence.interval > 1) {
+                    fprintf(file, ";INTERVAL=%d", current->recurrence.interval);
+                }
+                fprintf(file, ";BYDAY=%s", wday_names[w]);
                 if (current->recurrence.wkst >= 0 && current->recurrence.wkst < 7) {
                     fprintf(file, ";WKST=%s", wday_names[current->recurrence.wkst]);
                 }
