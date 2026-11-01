@@ -33,21 +33,7 @@ A lightweight, keyboard-driven terminal calendar for Linux built with C and Ncur
 
 Clone or navigate to the source directory and compile:
 
-```bash
-make
-```
-
-Run the application:
-
-```bash
-./microcal
-```
-
-To clean build artifacts:
-
-```bash
-make clean
-```
+Just run 'build_release' and it will build via cmake into a .build directory.
 
 ---
 
