@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.10)
+project(microcal C)
+
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# Find the ncurses library
+find_package(Curses REQUIRED)
+include_directories(${CURSES_INCLUDE_DIR})
+
+# Source files located in the src directory
+set(SOURCES
+    src/main.c
+    src/calendar.c
+    src/io.c
+    src/ui.c
+)
+
+# Executable target
+add_executable(microcal ${SOURCES})
+
+# Link ncurses
+target_link_libraries(microcal PRIVATE ${CURSES_LIBRARIES})
