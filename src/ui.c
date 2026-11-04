@@ -256,7 +256,7 @@ static void draw_side_event_panel(WINDOW* win, const CalendarState* cal, int win
                     const char* next_nl = strchr(p, '\n');
                     size_t seg_len = next_nl ? (size_t)(next_nl - p) : strlen(p);
                     if (seg_len >= sizeof(desc_buf)) seg_len = sizeof(desc_buf) - 1;
-                    strncpy(desc_buf, p, seg_len);
+                    memcpy(desc_buf, p, seg_len);
                     desc_buf[seg_len] = '\0';
 
                     print_clipped(win, cur_line++, 4, max_w - 4, desc_buf, true);
@@ -756,7 +756,7 @@ int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
                     const char* next_nl = strchr(p, '\n');
                     size_t seg_len = next_nl ? (size_t)(next_nl - p) : strlen(p);
                     if (seg_len >= sizeof(desc_buf)) seg_len = sizeof(desc_buf) - 1;
-                    strncpy(desc_buf, p, seg_len);
+                    memcpy(desc_buf, p, seg_len);
                     desc_buf[seg_len] = '\0';
 
                     int desc_y = base_screen_y + 1 + desc_line_idx;
