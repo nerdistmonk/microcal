@@ -6,6 +6,131 @@
 #include "ui.h"
 #include "io.h"
 
+static const char* const weekday_names[] = {
+    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
+};
+
+static const char* ordinal_suffix(int n) {
+    if (n % 100 >= 11 && n % 100 <= 13) return "th";
+    switch (n % 10) {
+    case 1: return "st";
+    case 2: return "nd";
+    case 3: return "rd";
+    default: return "th";
+    }
+}
+
+static bool parse_repeat_interval(const char* text, int* out) {
+    if (text[0] == '\0') {
+        *out = 1;
+        return true;
+    }
+    char* end = NULL;
+    long value = strtol(text, &end, 10);
+    if (*end != '\0' || value < 1 || value > 999) return false;
+    *out = (int)value;
+    return true;
+}
+
+// Accepts YYYY-MM-DD on or after the start date
+static bool parse_repeat_until(const char* text, int start_y, int start_m, int start_d,
+                               int* y, int* m, int* d) {
+    int ty = 0, tm = 0, td = 0, consumed = 0;
+    if (sscanf(text, "%d-%d-%d%n", &ty, &tm, &td, &consumed) != 3 || text[consumed] != '\0') return false;
+    if (ty < start_y || ty > 9999) return false;
+    if (tm < 1 || tm > 12 || td < 1 || td > days_in_month(ty, tm)) return false;
+    if (ty == start_y && (tm < start_m || (tm == start_m && td < start_d))) return false;
+    *y = ty;
+    *m = tm;
+    *d = td;
+    return true;
+}
+
+static void add_event_dialog(CalendarState* cal) {
+    char title_buf[MAX_TITLE_LEN] = {0};
+    if (!ui_show_prompt("New Event", "Enter event title", title_buf, sizeof(title_buf))) return;
+
+    int year = cal->current_year;
+    int month = cal->current_month;
+    int day = cal->selected_day;
+    int wd = get_day_of_week(year, month, day);
+    int nth = (day - 1) / 7 + 1;
+
+    char weekday_opt[64];
+    char monthday_opt[64];
+    char nth_opt[80];
+    snprintf(weekday_opt, sizeof(weekday_opt), "< Repeat on every %s >", weekday_names[wd]);
+    snprintf(monthday_opt, sizeof(monthday_opt), "< Repeat on every %d%s of the month >", day, ordinal_suffix(day));
+    snprintf(nth_opt, sizeof(nth_opt), "< Repeat on every %d%s %s of the month >",
+             nth, ordinal_suffix(nth), weekday_names[wd]);
+
+    enum { OPT_NONE, OPT_WEEKLY, OPT_MONTH_DAY, OPT_MONTH_NTH, OPT_YEARLY, OPT_COUNT };
+    const char* options[OPT_COUNT] = {
+        "< No repeat >", weekday_opt, monthday_opt, nth_opt, "< Repeat once a year >"
+    };
+
+    int choice = ui_show_choice("Repeat", options, OPT_COUNT, OPT_NONE);
+    if (choice < 0) return;
+
+    if (choice == OPT_NONE) {
+        calendar_add_event(cal, title_buf, "", year, month, day, NULL);
+        ui_show_message("Success", "Event added successfully!");
+        return;
+    }
+
+    RecurrenceRule rule;
+    memset(&rule, 0, sizeof(rule));
+    rule.interval = 1;
+    rule.wkst = -1;
+
+    if (choice == OPT_WEEKLY) {
+        rule.type = RECUR_WEEKLY;
+        rule.day_of_week_mask = 1 << wd;
+        rule.ordinal_mask[wd] = ORDINAL_ALL;
+    } else if (choice == OPT_MONTH_DAY) {
+        rule.type = RECUR_MONTHLY;
+        rule.day_of_month = day;
+    } else if (choice == OPT_MONTH_NTH) {
+        rule.type = RECUR_MONTHLY;
+        rule.day_of_week_mask = 1 << wd;
+        rule.ordinal_mask[wd] = recurrence_ordinal_bit(nth);
+    } else {
+        rule.type = RECUR_YEARLY;
+        rule.month_of_year = month;
+        rule.day_of_month = day;
+    }
+
+    const char* unit = choice == OPT_WEEKLY ? "weeks" : (choice == OPT_YEARLY ? "years" : "months");
+    char interval_prompt[64];
+    snprintf(interval_prompt, sizeof(interval_prompt), "Every how many %s (blank = 1)", unit);
+
+    char text[16];
+    for (;;) {
+        text[0] = '\0';
+        if (!ui_show_prompt_optional("Repeat", interval_prompt, text, sizeof(text))) return;
+        if (parse_repeat_interval(text, &rule.interval)) break;
+        ui_show_message("Invalid interval", "Enter a whole number from 1 to 999, or leave blank for 1.");
+    }
+
+    for (;;) {
+        text[0] = '\0';
+        if (!ui_show_prompt_optional("Repeat", "Ends on YYYY-MM-DD (blank = never)", text, sizeof(text))) return;
+        if (text[0] == '\0') break;
+        int until_y, until_m, until_d;
+        if (parse_repeat_until(text, year, month, day, &until_y, &until_m, &until_d)) {
+            rule.has_until = true;
+            rule.until_year = until_y;
+            rule.until_month = until_m;
+            rule.until_day = until_d;
+            break;
+        }
+        ui_show_message("Invalid date", "Enter a date as YYYY-MM-DD, on or after the event date.");
+    }
+
+    calendar_add_event(cal, title_buf, "", year, month, day, &rule);
+    ui_show_message("Success", "Event added successfully!");
+}
+
 int main(void) {
     ui_init();
 
@@ -108,14 +233,9 @@ int main(void) {
         }
         case 5: // Ctrl + E fallback
         case 'e':
-        case 'E': {
-            char title_buf[MAX_TITLE_LEN] = {0};
-            if (ui_show_prompt("New Event", "Enter event title", title_buf, sizeof(title_buf))) {
-                calendar_add_event(&cal, title_buf, "", cal.current_year, cal.current_month, cal.selected_day, NULL);
-                ui_show_message("Success", "Event added successfully!");
-            }
+        case 'E':
+            add_event_dialog(&cal);
             break;
-        }
         case 19: // Ctrl + S fallback
         case 's':
         case 'S': {
@@ -140,7 +260,7 @@ int main(void) {
                 "Mouse Scroll: Previous / Next month\n"
                 "PageUp/PageDown: Switch month\n"
                 "Enter / v: View and delete events on selected day\n"
-                "e: Add event on selected day\n"
+                "e: Add event on selected day (with optional repeat)\n"
                 "s: Save / Export to ICS\n"
                 "f: Toggle expanded event details (Type/Tags)\n"
                 "F2: Import ICS file\n"

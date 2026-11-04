@@ -44,7 +44,7 @@ Just run 'build_release' and it will build via cmake into a .build directory.
 | **Arrow Keys** | Navigate calendar days (Left, Right, Up, Down) |
 | **Page Up / Page Down** | Switch between previous and next months |
 | **Enter** / **v** | View scheduled events and details for the selected day |
-| **e** | Add a new event on the selected day |
+| **e** | Add an event on the selected day, with an optional repeat (see [Adding Events](#adding-events)) |
 | **s** | Save / export current calendar to `.ics` |
 | **F1** | Open Help and Keyguide dialog |
 | **F2** | Import an external `.ics` file (events whose UID already exists are replaced) |
@@ -58,6 +58,20 @@ When viewing events on a specific day (**Enter**):
 - **Up / Down**: Select between events on that day
 - **d** / **Delete**: Delete the currently selected event (asks for confirmation)
 - **Enter** / **Esc** / **q**: Close the event viewer
+
+### Adding Events
+
+Press **e** to add an event on the selected day:
+1. Type the event title and press **Enter**.
+2. Choose a repeat option with **Left / Right** (or **Up / Down**) and press **Enter**:
+   - `< No repeat >`: a single event.
+   - `< Repeat on every <weekday> >`: weekly on that weekday.
+   - `< Repeat on every <N>th of the month >`: monthly on that day number.
+   - `< Repeat on every <N>th <weekday> of the month >`: monthly on the same ordinal weekday (for example the 1st Wednesday). Days 29 to 31 count as the 5th occurrence, and months without a 5th occurrence are skipped.
+   - `< Repeat once a year >`: yearly on the same date.
+3. For repeating events, enter the interval (blank = 1, for example 2 for every other week) and an optional end date as `YYYY-MM-DD` (blank = never).
+
+**Esc** at any step cancels the event. Repeating events are saved in the `.ics` export as standard `RRULE` rules.
 
 ---
 
@@ -99,7 +113,7 @@ END:VCALENDAR
 ## Small Terminals
 
 - The day event view needs at least 50 columns and 9 lines. Below that it shows "Terminal too small" and keeps working when the window grows again.
-- Text prompts need at least 60 columns and 7 lines.
+- Text prompts and the repeat picker need at least 60 columns and 7 lines.
 - **Esc** cancels a text prompt. Previously Esc was entered as text.
 
 ---

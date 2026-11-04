@@ -365,7 +365,7 @@ static void ui_draw_input(WINDOW* win, int y, int x, int avail, const char* buf)
     wmove(win, y, x + (len - off));
 }
 
-bool ui_show_prompt(const char* title, const char* prompt, char* buf, int max_len) {
+static bool ui_run_prompt(const char* title, const char* prompt, char* buf, int max_len, bool allow_empty) {
     const int win_h = 7;
     const int win_w = 60;
 
@@ -429,7 +429,64 @@ bool ui_show_prompt(const char* title, const char* prompt, char* buf, int max_le
     touchwin(stdscr);
     refresh();
 
-    return submitted && buf[0] != '\0';
+    return submitted && (allow_empty || buf[0] != '\0');
+}
+
+bool ui_show_prompt(const char* title, const char* prompt, char* buf, int max_len) {
+    return ui_run_prompt(title, prompt, buf, max_len, false);
+}
+
+bool ui_show_prompt_optional(const char* title, const char* prompt, char* buf, int max_len) {
+    return ui_run_prompt(title, prompt, buf, max_len, true);
+}
+
+int ui_show_choice(const char* title, const char* const options[], int count, int selected) {
+    const int win_h = 7;
+    const int win_w = 60;
+
+    if (count <= 0) return -1;
+    if (LINES < win_h || COLS < win_w) {
+        ui_show_too_small();
+        return -1;
+    }
+
+    WINDOW* win = newwin(win_h, win_w, (LINES - win_h) / 2, (COLS - win_w) / 2);
+    if (!win) return -1;
+    keypad(win, TRUE);
+
+    if (selected < 0 || selected >= count) selected = 0;
+    int result = -1;
+    for (;;) {
+        werase(win);
+        box(win, 0, 0);
+        mvwprintw(win, 1, 2, "[ %s ]", title);
+
+        int label_len = (int)strlen(options[selected]);
+        int label_x = (win_w - label_len) / 2;
+        if (label_x < 1) label_x = 1;
+        mvwprintw(win, 3, label_x, "%.*s", win_w - label_x - 1, options[selected]);
+        mvwprintw(win, 5, 2, "Left/Right: change  Enter: select  Esc: cancel");
+        wrefresh(win);
+
+        int ch = wgetch(win);
+        if (ch == ERR) break;
+        if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
+            result = selected;
+            break;
+        }
+        if (ch == 27) break;
+
+        if (ch == KEY_LEFT || ch == KEY_UP) {
+            selected = (selected + count - 1) % count;
+        } else if (ch == KEY_RIGHT || ch == KEY_DOWN) {
+            selected = (selected + 1) % count;
+        }
+    }
+
+    delwin(win);
+    touchwin(stdscr);
+    refresh();
+    return result;
 }
 
 static int count_desc_lines(const char* desc) {
