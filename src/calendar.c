@@ -257,6 +257,20 @@ int calendar_get_events_for_day(const CalendarState* cal, int year, int month, i
         }
         curr = curr->next;
     }
+    // Stable insertion sort: all-day events first, then timed events by start time
+    for (int i = 1; i < count; i++) {
+        Event* ev = out_events[i];
+        int key = ev->is_timed ? ev->start_minute + 1 : 0;
+        int j = i;
+        while (j > 0) {
+            Event* prev = out_events[j - 1];
+            int prev_key = prev->is_timed ? prev->start_minute + 1 : 0;
+            if (prev_key <= key) break;
+            out_events[j] = prev;
+            j--;
+        }
+        out_events[j] = ev;
+    }
     return count;
 }
 

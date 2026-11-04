@@ -1,3 +1,6 @@
+// setenv, unsetenv, tzset, localtime_r and strdup are POSIX, not C99
+#define _POSIX_C_SOURCE 200809L
+
 #include "io.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -223,8 +226,8 @@ static bool read_digits(const char* s, int count, int* out) {
     return true;
 }
 
-// Parses YYYYMMDD with an optional THHMM[SS][Z] time. The time is floating: a trailing Z is ignored and the
-// wall-clock digits are kept. An invalid time is dropped, leaving a date-only result. Returns false for an invalid date.
+// Parses YYYYMMDD with an optional THHMM[SS][Z] time, keeping the wall-clock digits as written. An invalid time
+// is dropped, leaving a date-only result. Returns false for an invalid date.
 static bool parse_ics_datetime(const char* text, int* y, int* m, int* d, bool* has_time, int* minute) {
     int yy, mm, dd;
     if (!read_digits(text, 4, &yy) || !read_digits(text + 4, 2, &mm) || !read_digits(text + 6, 2, &dd)) {
@@ -243,6 +246,113 @@ static bool parse_ics_datetime(const char* text, int* y, int* m, int* d, bool* h
             *minute = hh * 60 + mi;
         }
     }
+    return true;
+}
+
+// Zones come from the system zone database. A name that is not a TZif file is rejected, so its times stay
+// floating rather than being read as UTC.
+#define ZONEINFO_DIR "/usr/share/zoneinfo/"
+#define MAX_TZID_LEN 128
+
+static bool zone_is_known(const char* zone) {
+    if (zone[0] == '\0' || zone[0] == '/' || strstr(zone, "..") != NULL) return false;
+    char path[sizeof(ZONEINFO_DIR) + MAX_TZID_LEN];
+    if (snprintf(path, sizeof(path), "%s%s", ZONEINFO_DIR, zone) >= (int)sizeof(path)) return false;
+    FILE* file = fopen(path, "rb");
+    if (file == NULL) return false;
+    char magic[4];
+    bool ok = fread(magic, 1, sizeof(magic), file) == sizeof(magic) && memcmp(magic, "TZif", 4) == 0;
+    fclose(file);
+    return ok;
+}
+
+// Converts a wall-clock time in a zone to its instant. tz is a TZ value: ":<zone>" for a zone file, or "UTC0".
+// The process TZ is restored before returning.
+static bool zone_to_instant(int y, int m, int d, int minute, const char* tz, time_t* instant) {
+    const char* old = getenv("TZ");
+    char* saved = NULL;
+    if (old != NULL) {
+        saved = strdup(old);
+        if (saved == NULL) return false;
+    }
+
+    struct tm tm;
+    memset(&tm, 0, sizeof(tm));
+    tm.tm_year = y - 1900;
+    tm.tm_mon = m - 1;
+    tm.tm_mday = d;
+    tm.tm_hour = minute / 60;
+    tm.tm_min = minute % 60;
+    tm.tm_isdst = -1;
+
+    setenv("TZ", tz, 1);
+    tzset();
+    time_t result = mktime(&tm);
+    if (saved != NULL) {
+        setenv("TZ", saved, 1);
+    } else {
+        unsetenv("TZ");
+    }
+    tzset();
+    free(saved);
+
+    if (result == (time_t)-1) return false;
+    *instant = result;
+    return true;
+}
+
+// Converts an instant to local wall-clock time
+static bool instant_to_local(time_t instant, int* y, int* m, int* d, int* minute) {
+    struct tm local;
+    if (localtime_r(&instant, &local) == NULL) return false;
+    *y = local.tm_year + 1900;
+    *m = local.tm_mon + 1;
+    *d = local.tm_mday;
+    *minute = local.tm_hour * 60 + local.tm_min;
+    return true;
+}
+
+// Gives the TZ value for a timed value with a trailing Z (UTC) or a known TZID. Returns false for floating
+// values and unknown zones.
+static bool ics_zone_tz(const char* text, const char* tzid, char* tz, size_t size) {
+    if (strchr(text, 'Z') != NULL) {
+        snprintf(tz, size, "UTC0");
+        return true;
+    }
+    if (tzid == NULL || !zone_is_known(tzid)) return false;
+    snprintf(tz, size, ":%s", tzid);
+    return true;
+}
+
+// Copies the TZID parameter of a property into zone. Returns NULL when the property has none. value is where the
+// property value starts, so a TZID inside the value is ignored.
+static const char* property_tzid(const char* line, const char* value, char* zone, size_t size) {
+    const char* param = strstr(line, "TZID=");
+    if (param == NULL || param >= value) return NULL;
+    param += 5;
+    if (*param == '"') param++;
+    size_t len = strcspn(param, ";:\"");
+    if (len == 0 || len >= size) return NULL;
+    memcpy(zone, param, len);
+    zone[len] = '\0';
+    return zone;
+}
+
+// Parses a date-time like parse_ics_datetime, then converts a timed value to local time: from UTC for a trailing Z,
+// or from the named zone for a TZID. Dates, and times in unknown zones, keep their wall-clock digits.
+// When zoned is given it is set to whether the value was converted, and instant receives the exact time.
+static bool parse_ics_value(const char* text, const char* tzid, int* y, int* m, int* d, bool* has_time, int* minute,
+                            bool* zoned, time_t* instant) {
+    if (!parse_ics_datetime(text, y, m, d, has_time, minute)) return false;
+    if (zoned) *zoned = false;
+    if (!*has_time) return true;
+
+    char tz[MAX_TZID_LEN + 2];
+    time_t t;
+    if (!ics_zone_tz(text, tzid, tz, sizeof(tz))) return true;
+    if (!zone_to_instant(*y, *m, *d, *minute, tz, &t) || !instant_to_local(t, y, m, d, minute)) return true;
+    if (zoned) *zoned = true;
+    if (instant) *instant = t;
     return true;
 }
 
@@ -355,7 +465,7 @@ static void parse_rrule(const char* line, RecurrenceRule* rule) {
     if ((v = rrule_value(line, "UNTIL=")) != NULL) {
         int y = 0, m = 0, d = 0, minute = 0;
         bool has_time = false;
-        if (parse_ics_datetime(v, &y, &m, &d, &has_time, &minute)) {
+        if (parse_ics_value(v, NULL, &y, &m, &d, &has_time, &minute, NULL, NULL)) {
             rule->has_until = true;
             rule->until_year = y;
             rule->until_month = m;
@@ -563,7 +673,8 @@ static void write_rrule(FILE* file, const Event* ev) {
 }
 
 // Adds each date in an EXDATE/RDATE value to list. Values may be comma-separated; a "/period" suffix is ignored.
-static void add_ics_date_values(DateList* list, const char* value) {
+// tzid is the zone of the values' times, or NULL.
+static void add_ics_date_values(DateList* list, const char* value, const char* tzid) {
     const char* p = value;
     while (*p) {
         size_t item_len = strcspn(p, ",");
@@ -574,7 +685,7 @@ static void add_ics_date_values(DateList* list, const char* value) {
             token[date_len] = '\0';
             int y = 0, m = 0, d = 0, minute = 0;
             bool has_time = false;
-            if (parse_ics_datetime(token, &y, &m, &d, &has_time, &minute)) {
+            if (parse_ics_value(token, tzid, &y, &m, &d, &has_time, &minute, NULL, NULL)) {
                 date_list_add(list, YMD_KEY(y, m, d));
             }
         }
@@ -624,6 +735,8 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
     int end_y = 0, end_m = 0, end_d = 0;
     bool start_timed = false;
     int start_minute = 0;
+    bool start_zoned = false;
+    time_t start_instant = 0;
     bool end_timed = false;
     int end_minute = 0;
     bool is_transparent = true;
@@ -680,6 +793,7 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
                 cat[0] = '\0';
                 start_y = 2026; start_m = 1; start_d = 1;
                 start_timed = false; start_minute = 0;
+                start_zoned = false; start_instant = 0;
                 end_y = 0; end_m = 0; end_d = 0;
                 end_timed = false; end_minute = 0;
                 is_transparent = true;
@@ -716,7 +830,12 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
                             has_end = true;
                         } else if (has_duration) {
                             int y2 = start_y, m2 = start_m, d2 = start_d, min2 = start_minute;
-                            add_seconds_to_datetime(&y2, &m2, &d2, &min2, duration_seconds);
+                            // A zoned start adds the exact elapsed time, so the end stays correct across DST changes.
+                            // A floating start adds wall-clock time, as RFC 5545 specifies.
+                            if (!start_zoned || !instant_to_local(start_instant + (time_t)duration_seconds, &y2, &m2, &d2, &min2)) {
+                                y2 = start_y; m2 = start_m; d2 = start_d; min2 = start_minute;
+                                add_seconds_to_datetime(&y2, &m2, &d2, &min2, duration_seconds);
+                            }
                             ey = y2; em = m2; ed = d2; end_min = min2;
                             has_end = true;
                         }
@@ -850,12 +969,18 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
                     if (val) {
                         int y = 0, m = 0, d = 0, minute = 0;
                         bool has_time = false;
-                        if (parse_ics_datetime(val, &y, &m, &d, &has_time, &minute)) {
+                        char zone[MAX_TZID_LEN];
+                        const char* tzid = property_tzid(line, val, zone, sizeof(zone));
+                        bool zoned = false;
+                        time_t instant = 0;
+                        if (parse_ics_value(val, tzid, &y, &m, &d, &has_time, &minute, &zoned, &instant)) {
                             start_y = y;
                             start_m = m;
                             start_d = d;
                             start_timed = has_time;
                             start_minute = minute;
+                            start_zoned = zoned;
+                            start_instant = instant;
                         }
                     }
                 }
@@ -864,7 +989,9 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
                     if (val) {
                         int y = 0, m = 0, d = 0, minute = 0;
                         bool has_time = false;
-                        if (parse_ics_datetime(val, &y, &m, &d, &has_time, &minute)) {
+                        char zone[MAX_TZID_LEN];
+                        const char* tzid = property_tzid(line, val, zone, sizeof(zone));
+                        if (parse_ics_value(val, tzid, &y, &m, &d, &has_time, &minute, NULL, NULL)) {
                             end_y = y;
                             end_m = m;
                             end_d = d;
@@ -881,18 +1008,22 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
                 }
                 else if (strncmp(line, "EXDATE", 6) == 0) {
                     char* val = find_property_value_start(line);
-                    if (val) add_ics_date_values(&exdates, val);
+                    char zone[MAX_TZID_LEN];
+                    if (val) add_ics_date_values(&exdates, val, property_tzid(line, val, zone, sizeof(zone)));
                 }
                 else if (strncmp(line, "RDATE", 5) == 0) {
                     char* val = find_property_value_start(line);
-                    if (val) add_ics_date_values(&rdates, val);
+                    char zone[MAX_TZID_LEN];
+                    if (val) add_ics_date_values(&rdates, val, property_tzid(line, val, zone, sizeof(zone)));
                 }
                 else if (strncmp(line, "RECURRENCE-ID", 13) == 0) {
                     char* val = find_property_value_start(line);
                     has_recid = true;
                     int y = 0, m = 0, d = 0, minute = 0;
                     bool has_time = false;
-                    recid_key = (val && parse_ics_datetime(val, &y, &m, &d, &has_time, &minute))
+                    char zone[MAX_TZID_LEN];
+                    const char* tzid = val ? property_tzid(line, val, zone, sizeof(zone)) : NULL;
+                    recid_key = (val && parse_ics_value(val, tzid, &y, &m, &d, &has_time, &minute, NULL, NULL))
                                     ? YMD_KEY(y, m, d) : 0;
                 }
                 else if (strncmp(line, "RRULE:", 6) == 0) {
