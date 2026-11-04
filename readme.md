@@ -69,7 +69,9 @@ Press **e** to add an event on the selected day:
    - `< Repeat on every <N>th of the month >`: monthly on that day number.
    - `< Repeat on every <N>th <weekday> of the month >`: monthly on the same ordinal weekday (for example the 1st Wednesday). Days 29 to 31 count as the 5th occurrence, and months without a 5th occurrence are skipped.
    - `< Repeat once a year >`: yearly on the same date.
-3. For repeating events, enter the interval (blank = 1, for example 2 for every other week) and an optional end date as `YYYY-MM-DD` (blank = never).
+3. For repeating events, a checkbox dialog appears (**Up / Down** to move, **Space** to toggle, **Enter** to confirm):
+   - `[ ] Every 2 weeks` (or months or years): when checked, the event repeats every second week (month, year). When unchecked, it repeats every week (month, year).
+   - `[ ] Ends on a date`: when unchecked, the event repeats forever. When checked, you enter an end date as `YYYY-MM-DD`.
 
 **Esc** at any step cancels the event. Repeating events are saved in the `.ics` export as standard `RRULE` rules.
 

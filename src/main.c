@@ -20,18 +20,6 @@ static const char* ordinal_suffix(int n) {
     }
 }
 
-static bool parse_repeat_interval(const char* text, int* out) {
-    if (text[0] == '\0') {
-        *out = 1;
-        return true;
-    }
-    char* end = NULL;
-    long value = strtol(text, &end, 10);
-    if (*end != '\0' || value < 1 || value > 999) return false;
-    *out = (int)value;
-    return true;
-}
-
 // Accepts YYYY-MM-DD on or after the start date
 static bool parse_repeat_until(const char* text, int start_y, int start_m, int start_d,
                                int* y, int* m, int* d) {
@@ -101,30 +89,29 @@ static void add_event_dialog(CalendarState* cal) {
     }
 
     const char* unit = choice == OPT_WEEKLY ? "weeks" : (choice == OPT_YEARLY ? "years" : "months");
-    char interval_prompt[64];
-    snprintf(interval_prompt, sizeof(interval_prompt), "Every how many %s (blank = 1)", unit);
+    char every_label[32];
+    snprintf(every_label, sizeof(every_label), "Every 2 %s", unit);
+    const char* labels[2] = { every_label, "Ends on a date" };
+    bool checked[2] = { false, false };
+    if (!ui_show_checkboxes("Repeat options", labels, checked, 2)) return;
 
-    char text[16];
-    for (;;) {
-        text[0] = '\0';
-        if (!ui_show_prompt_optional("Repeat", interval_prompt, text, sizeof(text))) return;
-        if (parse_repeat_interval(text, &rule.interval)) break;
-        ui_show_message("Invalid interval", "Enter a whole number from 1 to 999, or leave blank for 1.");
-    }
+    if (checked[0]) rule.interval = 2;
 
-    for (;;) {
-        text[0] = '\0';
-        if (!ui_show_prompt_optional("Repeat", "Ends on YYYY-MM-DD (blank = never)", text, sizeof(text))) return;
-        if (text[0] == '\0') break;
-        int until_y, until_m, until_d;
-        if (parse_repeat_until(text, year, month, day, &until_y, &until_m, &until_d)) {
-            rule.has_until = true;
-            rule.until_year = until_y;
-            rule.until_month = until_m;
-            rule.until_day = until_d;
-            break;
+    if (checked[1]) {
+        char text[16];
+        for (;;) {
+            text[0] = '\0';
+            if (!ui_show_prompt("Repeat", "Ends on YYYY-MM-DD", text, sizeof(text))) return;
+            int until_y, until_m, until_d;
+            if (parse_repeat_until(text, year, month, day, &until_y, &until_m, &until_d)) {
+                rule.has_until = true;
+                rule.until_year = until_y;
+                rule.until_month = until_m;
+                rule.until_day = until_d;
+                break;
+            }
+            ui_show_message("Invalid date", "Enter a date as YYYY-MM-DD, on or after the event date.");
         }
-        ui_show_message("Invalid date", "Enter a date as YYYY-MM-DD, on or after the event date.");
     }
 
     calendar_add_event(cal, title_buf, "", year, month, day, &rule);

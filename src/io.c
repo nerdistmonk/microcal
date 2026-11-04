@@ -435,12 +435,10 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
         }
         else if (strlen(line) > 0) {
             if (strncmp(line, "NAME:", 5) == 0) {
-                strncpy(cal->calendar_name, line + 5, sizeof(cal->calendar_name) - 1);
-                cal->calendar_name[sizeof(cal->calendar_name) - 1] = '\0';
+                copy_utf8_truncated(cal->calendar_name, sizeof(cal->calendar_name), line + 5);
             }
             else if (strncmp(line, "X-WR-CALNAME:", 13) == 0 && cal->calendar_name[0] == '\0') {
-                strncpy(cal->calendar_name, line + 13, sizeof(cal->calendar_name) - 1);
-                cal->calendar_name[sizeof(cal->calendar_name) - 1] = '\0';
+                copy_utf8_truncated(cal->calendar_name, sizeof(cal->calendar_name), line + 13);
             }
             else if (strcmp(line, "BEGIN:VEVENT") == 0) {
                 in_event = true;
@@ -490,9 +488,11 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
 
                     // A UID repeated within the same file gets a "#N" suffix so each event is kept
                     char unique_uid[MAX_UID_LEN];
+                    char uid_base[MAX_UID_LEN - 12];
+                    copy_utf8_truncated(uid_base, sizeof(uid_base), uid);
                     strcpy(unique_uid, uid);
                     for (int n = 2; uid_set_contains(&seen, unique_uid); n++) {
-                        snprintf(unique_uid, sizeof(unique_uid), "%.*s#%d", MAX_UID_LEN - 12, uid, n);
+                        snprintf(unique_uid, sizeof(unique_uid), "%s#%d", uid_base, n);
                     }
                     if (!uid_set_add(&seen, unique_uid)) ok = false;
 
@@ -513,38 +513,33 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
                 if (strncmp(line, "UID", 3) == 0) {
                     char* val = find_property_value_start(line);
                     if (val) {
-                        strncpy(uid, val, MAX_UID_LEN - 1);
-                        uid[MAX_UID_LEN - 1] = '\0';
+                        copy_utf8_truncated(uid, sizeof(uid), val);
                     }
                 }
                 else if (strncmp(line, "DTSTAMP", 7) == 0) {
                     char* val = find_property_value_start(line);
                     if (val) {
-                        strncpy(dtstamp, val, MAX_TIMESTAMP_LEN - 1);
-                        dtstamp[MAX_TIMESTAMP_LEN - 1] = '\0';
+                        copy_utf8_truncated(dtstamp, sizeof(dtstamp), val);
                     }
                 }
                 else if (strncmp(line, "SUMMARY", 7) == 0) {
                     char* val = find_property_value_start(line);
                     if (val) {
                         unescape_ics_text(val);
-                        strncpy(title, val, MAX_TITLE_LEN - 1);
-                        title[MAX_TITLE_LEN - 1] = '\0';
+                        copy_utf8_truncated(title, sizeof(title), val);
                     }
                 }
                 else if (strncmp(line, "DESCRIPTION", 11) == 0) {
                     char* val = find_property_value_start(line);
                     if (val) {
                         unescape_ics_text(val);
-                        strncpy(desc, val, MAX_DESC_LEN - 1);
-                        desc[MAX_DESC_LEN - 1] = '\0';
+                        copy_utf8_truncated(desc, sizeof(desc), val);
                     }
                 }
                 else if (strncmp(line, "CATEGORIES", 10) == 0) {
                     char* val = find_property_value_start(line);
                     if (val) {
-                        strncpy(cat, val, MAX_CATEGORY_LEN - 1);
-                        cat[MAX_CATEGORY_LEN - 1] = '\0';
+                        copy_utf8_truncated(cat, sizeof(cat), val);
                     }
                 }
                 else if (strncmp(line, "TRANSP", 6) == 0) {

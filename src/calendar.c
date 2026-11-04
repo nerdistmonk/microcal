@@ -6,6 +6,18 @@
 
 static int g_event_id_counter = 1;
 
+// Copies src into dst (dst_size includes the terminator), cutting at a character boundary
+// so a multi-byte UTF-8 sequence is never split. Returns the number of bytes copied.
+size_t copy_utf8_truncated(char* dst, size_t dst_size, const char* src) {
+    if (dst_size == 0) return 0;
+    size_t len = strlen(src);
+    if (len >= dst_size) len = dst_size - 1;
+    while (len > 0 && ((unsigned char)src[len] & 0xC0) == 0x80) len--;
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+    return len;
+}
+
 bool is_leap_year(int year) {
     if (year % 400 == 0) return true;
     if (year % 100 == 0) return false;
@@ -84,25 +96,18 @@ Event* calendar_add_event_full(CalendarState* cal, const char* uid, const char* 
     if (!event) return NULL;
 
     event->id = g_event_id_counter++;
-    strncpy(event->uid, uid, MAX_UID_LEN - 1);
-    event->uid[MAX_UID_LEN - 1] = '\0';
-
-    strncpy(event->dtstamp, dtstamp, MAX_TIMESTAMP_LEN - 1);
-    event->dtstamp[MAX_TIMESTAMP_LEN - 1] = '\0';
-
-    strncpy(event->title, title, MAX_TITLE_LEN - 1);
-    event->title[MAX_TITLE_LEN - 1] = '\0';
+    copy_utf8_truncated(event->uid, sizeof(event->uid), uid);
+    copy_utf8_truncated(event->dtstamp, sizeof(event->dtstamp), dtstamp);
+    copy_utf8_truncated(event->title, sizeof(event->title), title);
 
     if (desc) {
-        strncpy(event->description, desc, MAX_DESC_LEN - 1);
-        event->description[MAX_DESC_LEN - 1] = '\0';
+        copy_utf8_truncated(event->description, sizeof(event->description), desc);
     } else {
         event->description[0] = '\0';
     }
 
     if (category) {
-        strncpy(event->category, category, MAX_CATEGORY_LEN - 1);
-        event->category[MAX_CATEGORY_LEN - 1] = '\0';
+        copy_utf8_truncated(event->category, sizeof(event->category), category);
     } else {
         event->category[0] = '\0';
     }

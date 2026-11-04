@@ -1,6 +1,7 @@
 #ifndef CALENDAR_H
 #define CALENDAR_H
 
+#include <stddef.h>
 #include <stdbool.h>
 
 #define MAX_TITLE_LEN 128
@@ -84,6 +85,9 @@ bool calendar_delete_event(CalendarState* cal, int event_id);
 int calendar_get_events_for_day(const CalendarState* cal, int year, int month, int day,
                                 Event* out_events[], int max_events);
 void calendar_free_events(CalendarState* cal);
+
+// Text copy that never splits a UTF-8 sequence; returns bytes copied
+size_t copy_utf8_truncated(char* dst, size_t dst_size, const char* src);
 
 // Recurrence check
 bool event_occurs_on(const Event* event, int year, int month, int day);

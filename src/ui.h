@@ -33,6 +33,8 @@ bool ui_show_prompt(const char* title, const char* prompt, char* buf, int max_le
 bool ui_show_prompt_optional(const char* title, const char* prompt, char* buf, int max_len);
 // Left/Right (or Up/Down) cycle through options, Enter returns the index, Esc or ERR returns -1
 int ui_show_choice(const char* title, const char* const options[], int count, int selected);
+// Up/Down move, Space toggles, Enter returns true, Esc returns false
+bool ui_show_checkboxes(const char* title, const char* const labels[], bool checked[], int count);
 int ui_show_day_events(const CalendarState* cal, Event* events[], int count);
 
 // Mouse input translation

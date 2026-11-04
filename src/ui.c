@@ -426,6 +426,16 @@ static bool ui_run_prompt(const char* title, const char* prompt, char* buf, int 
     curs_set(0);
     delwin(win);
 
+    // The length limit can cut a multi-byte character; drop the incomplete tail
+    size_t len = strlen(buf);
+    size_t lead = len;
+    while (lead > 0 && ((unsigned char)buf[lead - 1] & 0xC0) == 0x80) lead--;
+    if (lead > 0) {
+        unsigned char c = (unsigned char)buf[lead - 1];
+        size_t need = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+        if (len - (lead - 1) < need) buf[lead - 1] = '\0';
+    }
+
     touchwin(stdscr);
     refresh();
 
@@ -487,6 +497,58 @@ int ui_show_choice(const char* title, const char* const options[], int count, in
     touchwin(stdscr);
     refresh();
     return result;
+}
+
+bool ui_show_checkboxes(const char* title, const char* const labels[], bool checked[], int count) {
+    const int win_w = 60;
+    const int win_h = count + 6;
+
+    if (count <= 0) return false;
+    if (LINES < win_h || COLS < win_w) {
+        ui_show_too_small();
+        return false;
+    }
+
+    WINDOW* win = newwin(win_h, win_w, (LINES - win_h) / 2, (COLS - win_w) / 2);
+    if (!win) return false;
+    keypad(win, TRUE);
+
+    int cursor = 0;
+    bool confirmed = false;
+    for (;;) {
+        werase(win);
+        box(win, 0, 0);
+        mvwprintw(win, 1, 2, "[ %s ]", title);
+
+        for (int i = 0; i < count; i++) {
+            if (i == cursor) wattron(win, A_REVERSE);
+            mvwprintw(win, 3 + i, 2, "[%c] %.*s", checked[i] ? 'x' : ' ', win_w - 8, labels[i]);
+            if (i == cursor) wattroff(win, A_REVERSE);
+        }
+        mvwprintw(win, win_h - 2, 2, "Up/Down: move  Space: toggle  Enter: ok  Esc: cancel");
+        wrefresh(win);
+
+        int ch = wgetch(win);
+        if (ch == ERR) break;
+        if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
+            confirmed = true;
+            break;
+        }
+        if (ch == 27) break;
+
+        if (ch == KEY_UP) {
+            cursor = (cursor + count - 1) % count;
+        } else if (ch == KEY_DOWN) {
+            cursor = (cursor + 1) % count;
+        } else if (ch == ' ') {
+            checked[cursor] = !checked[cursor];
+        }
+    }
+
+    delwin(win);
+    touchwin(stdscr);
+    refresh();
+    return confirmed;
 }
 
 static int count_desc_lines(const char* desc) {
