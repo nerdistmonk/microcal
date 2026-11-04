@@ -439,7 +439,6 @@ static bool ui_run_prompt(const char* title, const char* prompt, char* buf, int 
     int avail = win_w - input_x - 2;
     if (avail < 1) avail = 1;
 
-    buf[0] = '\0';
     bool submitted = false;
     curs_set(1);
 
