@@ -111,7 +111,7 @@ int main(void) {
         case 'E': {
             char title_buf[MAX_TITLE_LEN] = {0};
             if (ui_show_prompt("New Event", "Enter event title", title_buf, sizeof(title_buf))) {
-                calendar_add_event(&cal, title_buf, "Created from Microcal UI", cal.current_year, cal.current_month, cal.selected_day, NULL);
+                calendar_add_event(&cal, title_buf, "", cal.current_year, cal.current_month, cal.selected_day, NULL);
                 ui_show_message("Success", "Event added successfully!");
             }
             break;

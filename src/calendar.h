@@ -18,13 +18,22 @@ typedef enum {
     RECUR_YEARLY
 } RecurrenceType;
 
+// Set in ordinal_mask[] for a bare BYDAY weekday (e.g. MO rather than 1MO)
+#define ORDINAL_ALL (1 << 10)
+
 typedef struct {
     RecurrenceType type;
     int interval; // e.g. every 1 week, every 2 weeks, every 3 months (default 1)
     int day_of_month; // 1-31 (0 if not explicitly specified)
     int month_of_year; // 1-12 (0 if not explicitly specified)
-    int day_of_week_mask; // Bitmask for weekly: bit 0 = Sunday, 1 = Monday, ... 6 = Saturday
-    int wkst; // 0 = Sunday, 1 = Monday, -1 = unspecified
+    int day_of_week_mask; // BYDAY bitmask: bit 0 = Sunday, 1 = Monday, ... 6 = Saturday
+    int ordinal_mask[7]; // Per weekday (same index as the mask): ORDINAL_ALL or a set of recurrence_ordinal_bit() bits
+    int wkst; // 0 = Sunday, 1 = Monday, -1 = unspecified (treated as Monday)
+    bool has_until; // UNTIL given (compared at day granularity)
+    int until_year;
+    int until_month;
+    int until_day;
+    int count; // COUNT (0 = unbounded)
 } RecurrenceRule;
 
 typedef struct Event {
@@ -78,5 +87,8 @@ void calendar_free_events(CalendarState* cal);
 
 // Recurrence check
 bool event_occurs_on(const Event* event, int year, int month, int day);
+// Bit for a BYDAY ordinal: +1..+5 -> bits 0..4, -1..-5 -> bits 5..9; 0 if out of range
+int recurrence_ordinal_bit(int nth);
+void calendar_next_day(int* year, int* month, int* day);
 
 #endif // CALENDAR_H

@@ -5,6 +5,8 @@
 
 #define MIN_PANEL_COLS 92
 #define MIN_PANEL_LINES 16
+#define DAY_MIN_COLS 50
+#define DAY_MIN_LINES 9
 #define CAL_PANE_WIDTH 58
 
 static bool g_detailed_view = false;
@@ -288,6 +290,18 @@ int ui_get_day_at_coords(const CalendarState* cal, int my, int mx) {
     return -1;
 }
 
+static int ui_wait_key(WINDOW* win) {
+    int ch;
+    do {
+        ch = wgetch(win);
+    } while (ch == KEY_RESIZE);
+    return ch;
+}
+
+static void ui_show_too_small(void) {
+    ui_show_message("Terminal too small", "Resize the terminal and try again.");
+}
+
 void ui_show_message(const char* title, const char* message) {
     int line_count = 1;
     int max_len = (int)strlen(title);
@@ -335,19 +349,28 @@ void ui_show_message(const char* title, const char* message) {
     }
 
     mvwprintw(win, win_h - 2, 2, "Press any key to close...");
+    keypad(win, TRUE);
     wrefresh(win);
-    wgetch(win);
+    ui_wait_key(win);
     delwin(win);
 
     touchwin(stdscr);
     refresh();
 }
 
+static void ui_draw_input(WINDOW* win, int y, int x, int avail, const char* buf) {
+    int len = (int)strlen(buf);
+    int off = len > avail ? len - avail : 0;
+    mvwprintw(win, y, x, "%-*.*s", avail, avail, buf + off);
+    wmove(win, y, x + (len - off));
+}
+
 bool ui_show_prompt(const char* title, const char* prompt, char* buf, int max_len) {
-    int win_h = 7;
-    int win_w = 60;
+    const int win_h = 7;
+    const int win_w = 60;
 
     if (LINES < win_h || COLS < win_w) {
+        ui_show_too_small();
         return false;
     }
 
@@ -359,22 +382,54 @@ bool ui_show_prompt(const char* title, const char* prompt, char* buf, int max_le
         return false;
     }
 
+    keypad(win, TRUE);
     box(win, 0, 0);
     mvwprintw(win, 1, 2, "%s", title);
     mvwprintw(win, 3, 2, "%s: ", prompt);
-    wrefresh(win);
 
-    echo();
+    int input_x = 2 + (int)strlen(prompt) + 2;
+    int avail = win_w - input_x - 2;
+    if (avail < 1) avail = 1;
+
+    buf[0] = '\0';
+    bool submitted = false;
     curs_set(1);
-    wgetnstr(win, buf, max_len - 1);
-    noecho();
+
+    for (;;) {
+        ui_draw_input(win, 3, input_x, avail, buf);
+        wrefresh(win);
+
+        int ch = wgetch(win);
+        if (ch == ERR) break;
+        if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
+            submitted = true;
+            break;
+        }
+        if (ch == 27) break;
+
+        if (ch == KEY_BACKSPACE || ch == 127 || ch == '\b') {
+            int len = (int)strlen(buf);
+            if (len > 0) {
+                len--;
+                while (len > 0 && ((unsigned char)buf[len] & 0xC0) == 0x80) len--;
+                buf[len] = '\0';
+            }
+        } else if ((ch >= 32 && ch < 127) || (ch >= 128 && ch <= 255)) {
+            int len = (int)strlen(buf);
+            if (len < max_len - 1) {
+                buf[len] = (char)ch;
+                buf[len + 1] = '\0';
+            }
+        }
+    }
+
     curs_set(0);
     delwin(win);
 
     touchwin(stdscr);
     refresh();
 
-    return strlen(buf) > 0;
+    return submitted && buf[0] != '\0';
 }
 
 static int count_desc_lines(const char* desc) {
@@ -386,11 +441,54 @@ static int count_desc_lines(const char* desc) {
     return count;
 }
 
-int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
-    int win_w = COLS - 10;
-    if (win_w > 80) win_w = 80;
-    if (win_w < 50) win_w = 50;
+static bool ui_confirm_delete(const char* title) {
+    const int win_h = 7;
+    int win_w = COLS < 60 ? COLS : 60;
 
+    if (LINES < win_h || win_w < 42) {
+        ui_show_too_small();
+        return false;
+    }
+
+    WINDOW* win = newwin(win_h, win_w, (LINES - win_h) / 2, (COLS - win_w) / 2);
+    if (!win) {
+        return false;
+    }
+
+    keypad(win, TRUE);
+    box(win, 0, 0);
+    int title_max = win_w - 13;
+    if (title_max > 40) title_max = 40;
+    mvwprintw(win, 1, 2, "Delete \"%.*s\"?", title_max, title);
+    mvwprintw(win, 3, 2, "Press Y to delete, N or ESC to cancel.");
+    wrefresh(win);
+
+    int ch;
+    do {
+        ch = wgetch(win);
+    } while (ch != ERR && ch != 'y' && ch != 'Y' && ch != 'n' && ch != 'N' &&
+             ch != 'q' && ch != 'Q' && ch != 27);
+
+    delwin(win);
+    return ch == 'y' || ch == 'Y';
+}
+
+static bool day_window_geometry(int content_lines, int count, int* w, int* h, int* y, int* x) {
+    if (COLS < DAY_MIN_COLS || LINES < DAY_MIN_LINES) return false;
+
+    *w = COLS - 10;
+    if (*w > 80) *w = 80;
+    if (*w < 50) *w = 50;
+
+    *h = (count == 0) ? 7 : (content_lines + 5);
+    if (*h > LINES - 2) *h = LINES - 2;
+
+    *y = (LINES - *h) / 2;
+    *x = (COLS - *w) / 2;
+    return true;
+}
+
+int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
     int total_content_lines = 0;
     for (int i = 0; i < count; i++) {
         total_content_lines += 1;
@@ -398,42 +496,60 @@ int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
         total_content_lines += 1;
     }
 
-    int win_h = (count == 0) ? 7 : (total_content_lines + 5);
-    if (win_h > LINES - 2) win_h = LINES - 2;
-
-    WINDOW* win = newwin(win_h, win_w, (LINES - win_h) / 2, (COLS - win_w) / 2);
-    if (!win) return 0;
-
-    keypad(win, TRUE);
-
     char header[64];
     snprintf(header, sizeof(header), " Events for %04d-%02d-%02d (%d) ",
              cal->current_year, cal->current_month, cal->selected_day, count);
 
-    if (count == 0) {
-        box(win, 0, 0);
-        mvwprintw(win, 1, 2, "%s", header);
-        mvwprintw(win, 3, 2, "No events scheduled for this day.");
-        mvwprintw(win, win_h - 2, 2, "Press any key to return...");
-        wrefresh(win);
-        wgetch(win);
-        delwin(win);
-        touchwin(stdscr);
-        refresh();
+    int win_w, win_h, win_y, win_x;
+    if (!day_window_geometry(total_content_lines, count, &win_w, &win_h, &win_y, &win_x)) {
+        ui_show_too_small();
         return 0;
     }
 
+    WINDOW* win = NULL;
     int selected_idx = 0;
     int scroll_offset = 0;
     int to_delete_id = 0;
     bool done = false;
-    int max_text_w = win_w - 6;
-    int viewable_height = win_h - 4;
+    bool too_small = false;
 
     while (!done) {
+        int new_w, new_h, new_y, new_x;
+        if (!day_window_geometry(total_content_lines, count, &new_w, &new_h, &new_y, &new_x)) {
+            too_small = true;
+            break;
+        }
+        if (!win || new_w != win_w || new_h != win_h || new_y != win_y || new_x != win_x) {
+            if (win) {
+                delwin(win);
+                clear();
+            }
+            win_w = new_w;
+            win_h = new_h;
+            win_y = new_y;
+            win_x = new_x;
+            win = newwin(win_h, win_w, win_y, win_x);
+            if (!win) {
+                too_small = true;
+                break;
+            }
+            keypad(win, TRUE);
+        }
+
+        int max_text_w = win_w - 6;
+        int viewable_height = win_h - 4;
+
         werase(win);
         box(win, 0, 0);
         mvwprintw(win, 1, 2, "%s", header);
+
+        if (count == 0) {
+            mvwprintw(win, 3, 2, "No events scheduled for this day.");
+            mvwprintw(win, win_h - 2, 2, "Press any key to return...");
+            wrefresh(win);
+            if (wgetch(win) != KEY_RESIZE) done = true;
+            continue;
+        }
 
         int item_start_y[MAX_DAY_EVENTS];
         int curr_y = 0;
@@ -497,8 +613,14 @@ int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
         case 'd':
         case 'D':
         case KEY_DC:
-            to_delete_id = events[selected_idx]->id;
-            done = true;
+            if (ui_confirm_delete(events[selected_idx]->title)) {
+                to_delete_id = events[selected_idx]->id;
+                done = true;
+            } else {
+                touchwin(stdscr);
+                refresh();
+                touchwin(win);
+            }
             break;
         case 27: // ESC
         case 'q':
@@ -510,8 +632,9 @@ int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
         }
     }
 
-    delwin(win);
+    if (win) delwin(win);
     touchwin(stdscr);
     refresh();
+    if (too_small) ui_show_too_small();
     return to_delete_id;
 }
