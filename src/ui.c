@@ -166,6 +166,45 @@ static void draw_calendar_grid_window(WINDOW* win, const CalendarState* cal, int
     wattroff(win, COLOR_PAIR(2));
 }
 
+// Prints text cut to max_bytes without splitting a UTF-8 character. With pad, the rest of the field is
+// filled with spaces. Returns the number of text bytes printed.
+static size_t print_clipped(WINDOW* win, int y, int x, int max_bytes, const char* text, bool pad) {
+    char buf[MAX_DESC_LEN];
+    if (max_bytes < 0) max_bytes = 0;
+    size_t cap = (size_t)max_bytes + 1;
+    if (cap > sizeof(buf)) cap = sizeof(buf);
+    size_t used = copy_utf8_truncated(buf, cap, text);
+    int pad_count = pad ? max_bytes - (int)used : 0;
+    mvwprintw(win, y, x, "%s%*s", buf, pad_count, "");
+    return used;
+}
+
+// Time of day for a timed event: "HH:MM", "HH:MM-HH:MM", with " +N day(s)" if the end is on a later date.
+// Empty for all-day events.
+static void format_event_time(const Event* ev, char* out, size_t out_size) {
+    out[0] = '\0';
+    if (!ev->is_timed) return;
+    int start_h = ev->start_minute / 60;
+    int start_m = ev->start_minute % 60;
+    if (ev->end_minute < 0) {
+        snprintf(out, out_size, "%02d:%02d", start_h, start_m);
+        return;
+    }
+    int extra_days = 0;
+    int y = ev->year, m = ev->month, d = ev->day;
+    while (extra_days < 99 && YMD_KEY(y, m, d) < YMD_KEY(ev->end_year, ev->end_month, ev->end_day)) {
+        calendar_next_day(&y, &m, &d);
+        extra_days++;
+    }
+    snprintf(out, out_size, "%02d:%02d-%02d:%02d", start_h, start_m, ev->end_minute / 60, ev->end_minute % 60);
+    size_t used = strlen(out);
+    if (extra_days == 1) {
+        snprintf(out + used, out_size - used, " +1 day");
+    } else if (extra_days > 1) {
+        snprintf(out + used, out_size - used, " +%d days", extra_days);
+    }
+}
+
 static void draw_side_event_panel(WINDOW* win, const CalendarState* cal, int win_w, int win_h) {
     wattron(win, COLOR_PAIR(2));
     box(win, 0, 0);
@@ -195,15 +234,19 @@ static void draw_side_event_panel(WINDOW* win, const CalendarState* cal, int win
                 break;
             }
 
-            char item_line[MAX_TITLE_LEN + 16];
-            snprintf(item_line, sizeof(item_line), "- %s", day_events[i]->title);
+            char when[48];
+            format_event_time(day_events[i], when, sizeof(when));
+            char item_line[MAX_TITLE_LEN + 64];
+            snprintf(item_line, sizeof(item_line), "- %s%s%s", when, when[0] ? " " : "", day_events[i]->title);
 
             wattron(win, COLOR_PAIR(1) | A_BOLD);
-            mvwprintw(win, cur_line++, 2, "%-*.*s", max_w, max_w, item_line);
+            print_clipped(win, cur_line++, 2, max_w, item_line, true);
             wattroff(win, COLOR_PAIR(1) | A_BOLD);
 
             if (g_detailed_view && strlen(day_events[i]->category) > 0 && cur_line < win_h - 2) {
-                mvwprintw(win, cur_line++, 4, "Type: %-*.*s", max_w - 8, max_w - 8, day_events[i]->category);
+                char type_line[MAX_CATEGORY_LEN + 8];
+                snprintf(type_line, sizeof(type_line), "Type: %s", day_events[i]->category);
+                print_clipped(win, cur_line++, 4, max_w - 4, type_line, true);
             }
 
             if (strlen(day_events[i]->description) > 0) {
@@ -216,7 +259,7 @@ static void draw_side_event_panel(WINDOW* win, const CalendarState* cal, int win
                     strncpy(desc_buf, p, seg_len);
                     desc_buf[seg_len] = '\0';
 
-                    mvwprintw(win, cur_line++, 4, "%-*.*s", max_w - 4, max_w - 4, desc_buf);
+                    print_clipped(win, cur_line++, 4, max_w - 4, desc_buf, true);
 
                     if (!next_nl) break;
                     p = next_nl + 1;
@@ -339,9 +382,7 @@ void ui_show_message(const char* title, const char* message) {
     while (*start && cur_row < win_h - 2) {
         const char* next_newline = strchr(start, '\n');
         size_t len = next_newline ? (size_t)(next_newline - start) : strlen(start);
-        if (len >= sizeof(buffer)) len = sizeof(buffer) - 1;
-        strncpy(buffer, start, len);
-        buffer[len] = '\0';
+        copy_utf8_truncated(buffer, len + 1 < sizeof(buffer) ? len + 1 : sizeof(buffer), start);
 
         mvwprintw(win, cur_row++, 2, "%s", buffer);
         if (!next_newline) break;
@@ -361,8 +402,15 @@ void ui_show_message(const char* title, const char* message) {
 static void ui_draw_input(WINDOW* win, int y, int x, int avail, const char* buf) {
     int len = (int)strlen(buf);
     int off = len > avail ? len - avail : 0;
+    // Start on a character boundary so a multi-byte character is never split
+    while (off < len && ((unsigned char)buf[off] & 0xC0) == 0x80) off++;
     mvwprintw(win, y, x, "%-*.*s", avail, avail, buf + off);
-    wmove(win, y, x + (len - off));
+    // The cursor goes after the last character, counted in characters rather than bytes
+    int chars = 0;
+    for (int i = off; i < len; i++) {
+        if (((unsigned char)buf[i] & 0xC0) != 0x80) chars++;
+    }
+    wmove(win, y, x + chars);
 }
 
 static bool ui_run_prompt(const char* title, const char* prompt, char* buf, int max_len, bool allow_empty) {
@@ -578,7 +626,9 @@ static bool ui_confirm_delete(const char* title) {
     box(win, 0, 0);
     int title_max = win_w - 13;
     if (title_max > 40) title_max = 40;
-    mvwprintw(win, 1, 2, "Delete \"%.*s\"?", title_max, title);
+    mvwprintw(win, 1, 2, "Delete \"");
+    size_t shown = print_clipped(win, 1, 10, title_max, title, false);
+    mvwprintw(win, 1, 10 + (int)shown, "\"?");
     mvwprintw(win, 3, 2, "Press Y to delete, N or ESC to cancel.");
     wrefresh(win);
 
@@ -690,8 +740,12 @@ int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
             int base_screen_y = 2 + (item_start_y[i] - scroll_offset);
 
             if (base_screen_y >= 2 && base_screen_y < win_h - 2) {
+                char when[48];
+                format_event_time(events[i], when, sizeof(when));
+                char label[MAX_TITLE_LEN + 64];
+                snprintf(label, sizeof(label), "%s%s%s", when, when[0] ? "  " : "", events[i]->title);
                 if (i == selected_idx) wattron(win, A_REVERSE | A_BOLD);
-                mvwprintw(win, base_screen_y, 3, "%-*.*s", max_text_w - 3, max_text_w - 3, events[i]->title);
+                print_clipped(win, base_screen_y, 3, max_text_w - 3, label, true);
                 if (i == selected_idx) wattroff(win, A_REVERSE | A_BOLD);
             }
 
@@ -708,7 +762,7 @@ int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
 
                     int desc_y = base_screen_y + 1 + desc_line_idx;
                     if (desc_y >= 2 && desc_y < win_h - 2) {
-                        mvwprintw(win, desc_y, 5, "%-*.*s", max_text_w - 5, max_text_w - 5, desc_buf);
+                        print_clipped(win, desc_y, 5, max_text_w - 5, desc_buf, true);
                     }
 
                     desc_line_idx++;

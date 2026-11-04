@@ -118,8 +118,17 @@ Event* calendar_add_event_full(CalendarState* cal, const char* uid, const char* 
     event->end_year = end_year;
     event->end_month = end_month;
     event->end_day = end_day;
+    event->is_timed = false;
+    event->start_minute = 0;
+    event->end_minute = -1;
     event->is_transparent = is_transparent;
     event->sequence = sequence;
+    event->exdates.items = NULL;
+    event->exdates.count = 0;
+    event->exdates.capacity = 0;
+    event->rdates.items = NULL;
+    event->rdates.count = 0;
+    event->rdates.capacity = 0;
 
     if (rule) {
         event->is_recurring = true;
@@ -143,6 +152,77 @@ Event* calendar_add_event_full(CalendarState* cal, const char* uid, const char* 
     return event;
 }
 
+static bool date_list_contains(const DateList* list, int key) {
+    for (int i = 0; i < list->count; i++) {
+        if (list->items[i] == key) return true;
+    }
+    return false;
+}
+
+bool date_list_add(DateList* list, int key) {
+    if (date_list_contains(list, key)) return true;
+    if (list->count == list->capacity) {
+        int new_capacity = list->capacity ? list->capacity * 2 : 8;
+        int* grown = realloc(list->items, (size_t)new_capacity * sizeof(int));
+        if (!grown) return false;
+        list->items = grown;
+        list->capacity = new_capacity;
+    }
+    list->items[list->count++] = key;
+    return true;
+}
+
+void date_list_free(DateList* list) {
+    free(list->items);
+    list->items = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
+
+bool calendar_event_set_timed(Event* event, int start_minute, int end_year, int end_month, int end_day, int end_minute) {
+    if (start_minute < 0 || start_minute > 1439) return false;
+    if (end_minute < -1 || end_minute > 1439) return false;
+
+    event->is_timed = true;
+    event->start_minute = start_minute;
+    event->end_minute = end_minute;
+    if (end_minute < 0) {
+        event->end_year = event->year;
+        event->end_month = event->month;
+        event->end_day = event->day;
+    } else {
+        event->end_year = end_year;
+        event->end_month = end_month;
+        event->end_day = end_day;
+    }
+    return true;
+}
+
+// EXDATE and RDATE only take effect on recurring events, so an event without a rule becomes RECUR_NONE
+static void event_mark_recurring(Event* event) {
+    if (event->is_recurring) return;
+    memset(&event->recurrence, 0, sizeof(RecurrenceRule));
+    event->recurrence.type = RECUR_NONE;
+    event->recurrence.interval = 1;
+    event->recurrence.wkst = -1;
+    event->is_recurring = true;
+}
+
+bool calendar_event_add_exdate(Event* event, int year, int month, int day) {
+    event_mark_recurring(event);
+    return date_list_add(&event->exdates, YMD_KEY(year, month, day));
+}
+
+bool calendar_event_add_rdate(Event* event, int year, int month, int day) {
+    event_mark_recurring(event);
+    return date_list_add(&event->rdates, YMD_KEY(year, month, day));
+}
+
+static void event_release_lists(Event* event) {
+    date_list_free(&event->exdates);
+    date_list_free(&event->rdates);
+}
+
 bool calendar_delete_event(CalendarState* cal, int event_id) {
     Event* curr = cal->events_head;
     Event* prev = NULL;
@@ -157,6 +237,7 @@ bool calendar_delete_event(CalendarState* cal, int event_id) {
             if (curr == cal->events_tail) {
                 cal->events_tail = prev;
             }
+            event_release_lists(curr);
             free(curr);
             return true;
         }
@@ -212,11 +293,6 @@ static int resolved_wkst(const Event* ev) {
     return ev->recurrence.wkst == 0 ? 0 : 1;
 }
 
-static bool date_after(int y1, int m1, int d1, int y2, int m2, int d2) {
-    if (y1 != y2) return y1 > y2;
-    if (m1 != m2) return m1 > m2;
-    return d1 > d2;
-}
 
 // Index of the recurrence period containing (y, m, d), counted from the DTSTART period
 static long period_index(const Event* ev, int y, int m, int d) {
@@ -313,99 +389,186 @@ static bool weekday_ordinal_matches(const Event* ev, int y, int m, int d, bool y
     return (mask & recurrence_ordinal_bit(from_start)) || (mask & recurrence_ordinal_bit(-from_end));
 }
 
-// BYMONTHDAY and BYDAY both limit the set (intersection); with neither, the DTSTART day is used
-static bool month_day_filter(const Event* ev, int y, int m, int d, bool year_scope) {
+// BYMONTHDAY: +n counts from the start of the month, -n from the end
+static bool mday_matches(const RecurrenceRule* r, int y, int m, int d) {
+    if (r->mday_mask & MDAY_BIT(d)) return true;
+    int len = days_in_month(y, m);
+    return (r->mday_neg_mask & MDAY_BIT(len - d + 1)) != 0;
+}
+
+// Whether (y, m, d) is an occurrence day before BYSETPOS is applied
+static bool day_passes_filter(const Event* ev, int y, int m, int d) {
     const RecurrenceRule* r = &ev->recurrence;
-    bool has_mday = r->day_of_month > 0;
+    if (r->month_mask && !(r->month_mask & MONTH_BIT(m))) return false;
+
+    bool has_mday = (r->mday_mask | r->mday_neg_mask) != 0;
     bool has_byday = r->day_of_week_mask != 0;
 
-    if (!has_mday && !has_byday) return d == ev->day;
-    if (has_mday && d != r->day_of_month) return false;
+    // Without BYMONTHDAY or BYDAY, the period implies the DTSTART day (and month for YEARLY)
+    if (!has_mday && !has_byday) {
+        switch (r->type) {
+        case RECUR_DAILY:
+            return true;
+        case RECUR_WEEKLY:
+            return get_day_of_week(y, m, d) == get_day_of_week(ev->year, ev->month, ev->day);
+        case RECUR_MONTHLY:
+            return d == ev->day;
+        case RECUR_YEARLY:
+            return d == ev->day && (r->month_mask != 0 || m == ev->month);
+        default:
+            return false;
+        }
+    }
+
+    // An ordinal BYDAY without BYMONTH is relative to the year
+    bool year_scope = r->type == RECUR_YEARLY && r->month_mask == 0;
+    if (has_mday && !mday_matches(r, y, m, d)) return false;
     if (has_byday && !weekday_ordinal_matches(ev, y, m, d, year_scope)) return false;
     return true;
 }
 
-static bool day_passes_filter(const Event* ev, int y, int m, int d) {
+// Ascending day numbers of the occurrences in period k, clipped to DTSTART and UNTIL and
+// reduced by BYSETPOS. out must hold MAX_PERIOD_DAYS entries. Returns the count.
+static int period_occurrences(const Event* ev, long k, long* out) {
     const RecurrenceRule* r = &ev->recurrence;
-    switch (r->type) {
-    case RECUR_DAILY:
-        return r->day_of_week_mask == 0 || (r->day_of_week_mask & (1 << get_day_of_week(y, m, d)));
-    case RECUR_WEEKLY: {
-        int wd = get_day_of_week(y, m, d);
-        if (r->day_of_week_mask == 0) {
-            return wd == get_day_of_week(ev->year, ev->month, ev->day);
-        }
-        return (r->day_of_week_mask & (1 << wd)) != 0;
+    long lo, hi;
+    period_bounds(ev, k, &lo, &hi);
+    long start = days_since_epoch(ev->year, ev->month, ev->day);
+    if (lo < start) lo = start;
+    if (r->has_until) {
+        long until = days_since_epoch(r->until_year, r->until_month, r->until_day);
+        if (hi > until) hi = until;
     }
-    case RECUR_MONTHLY:
-        return month_day_filter(ev, y, m, d, false);
-    case RECUR_YEARLY: {
-        bool constrained = r->day_of_month > 0 || r->day_of_week_mask != 0;
-        if (r->month_of_year > 0 || !constrained) {
-            int target_month = r->month_of_year > 0 ? r->month_of_year : ev->month;
-            if (m != target_month) return false;
-        }
-        return month_day_filter(ev, y, m, d, r->month_of_year == 0);
+
+    int n = 0;
+    for (long day = lo; day <= hi; day++) {
+        int yy, mm, dd;
+        ymd_from_day_number(day, &yy, &mm, &dd);
+        if (day_passes_filter(ev, yy, mm, dd)) out[n++] = day;
     }
-    default:
-        return false;
+
+    if (r->setpos_count == 0 || n == 0) return n;
+
+    bool chosen[MAX_PERIOD_DAYS] = {false};
+    for (int i = 0; i < r->setpos_count; i++) {
+        int p = r->setpos[i];
+        int idx = p > 0 ? p - 1 : n + p;
+        if (idx >= 0 && idx < n) chosen[idx] = true;
     }
+    int kept = 0;
+    for (int i = 0; i < n; i++) {
+        if (chosen[i]) out[kept++] = out[i];
+    }
+    return kept;
 }
 
-// Occurrences in [DTSTART, target] up to (and including) period p_target; stops early once COUNT is exceeded
-static long count_occurrences_through(const Event* ev, int y, int m, int d, long p_target) {
+// Occurrences from DTSTART through target (in period p_target); stops early once COUNT is exceeded.
+// Counts only rule-generated occurrences: EXDATE and RDATE do not change the count.
+static long count_occurrences_through(const Event* ev, long target, long p_target) {
     const RecurrenceRule* r = &ev->recurrence;
     long interval = interval_of(ev);
-    long start = days_since_epoch(ev->year, ev->month, ev->day);
-    long target = days_since_epoch(y, m, d);
 
-    if (r->type == RECUR_DAILY && r->day_of_week_mask == 0) {
+    if (r->type == RECUR_DAILY && r->month_mask == 0 && r->mday_mask == 0 && r->mday_neg_mask == 0 &&
+        r->day_of_week_mask == 0 && r->setpos_count == 0) {
         return p_target / interval + 1;
     }
 
     long total = 0;
+    long days[MAX_PERIOD_DAYS];
     for (long k = 0; k <= p_target; k += interval) {
-        long lo, hi;
-        period_bounds(ev, k, &lo, &hi);
-        if (lo < start) lo = start;
-        if (hi > target) hi = target;
-        for (long n = lo; n <= hi; n++) {
-            int yy, mm, dd;
-            ymd_from_day_number(n, &yy, &mm, &dd);
-            if (day_passes_filter(ev, yy, mm, dd)) total++;
+        int n = period_occurrences(ev, k, days);
+        for (int i = 0; i < n; i++) {
+            if (days[i] <= target) total++;
         }
         if (total > r->count) break;
     }
     return total;
 }
 
-bool event_occurs_on(const Event* event, int year, int month, int day) {
+// Number of days an event occupies from its start. All-day DTEND is exclusive; timed events occupy one day
+static long event_span_days(const Event* event) {
+    if (event->is_timed) return 1;
+    long start = days_since_epoch(event->year, event->month, event->day);
+    long end = days_since_epoch(event->end_year, event->end_month, event->end_day);
+    return end > start ? end - start : 1;
+}
+
+static void previous_day(int* year, int* month, int* day) {
+    if (*day > 1) {
+        (*day)--;
+        return;
+    }
+    if (*month > 1) {
+        (*month)--;
+    } else {
+        (*month) = 12;
+        (*year)--;
+    }
+    *day = days_in_month(*year, *month);
+}
+
+// True when a recurrence occurrence (or the non-recurring event) begins on the given date
+static bool occurrence_starts_on(const Event* event, int year, int month, int day) {
     if (!event->is_recurring) {
         return (event->year == year && event->month == month && event->day == day);
     }
 
+    int key = YMD_KEY(year, month, day);
+    if (date_list_contains(&event->exdates, key)) return false;
+    if (date_list_contains(&event->rdates, key)) return true;
+
     const RecurrenceRule* r = &event->recurrence;
-    if (r->type == RECUR_NONE) return false;
-    if (days_since_epoch(year, month, day) < days_since_epoch(event->year, event->month, event->day)) {
-        return false;
+    long target = days_since_epoch(year, month, day);
+    if (r->type == RECUR_NONE) {
+        return target == days_since_epoch(event->year, event->month, event->day);
     }
-    if (r->has_until && date_after(year, month, day, r->until_year, r->until_month, r->until_day)) {
-        return false;
-    }
+
+    if (target < days_since_epoch(event->year, event->month, event->day)) return false;
+    if (r->has_until && target > days_since_epoch(r->until_year, r->until_month, r->until_day)) return false;
 
     long p = period_index(event, year, month, day);
     if (p % interval_of(event) != 0) return false;
-    if (!day_passes_filter(event, year, month, day)) return false;
-    if (r->count <= 0) return true;
 
+    if (r->setpos_count == 0) {
+        if (!day_passes_filter(event, year, month, day)) return false;
+    } else {
+        long days[MAX_PERIOD_DAYS];
+        int n = period_occurrences(event, p, days);
+        bool found = false;
+        for (int i = 0; i < n && !found; i++) {
+            found = days[i] == target;
+        }
+        if (!found) return false;
+    }
+
+    if (r->count <= 0) return true;
     // DTSTART is occurrence 1 when it matches the rule, so the target's occurrence number must be within COUNT
-    return count_occurrences_through(event, year, month, day, p) <= r->count;
+    return count_occurrences_through(event, target, p) <= r->count;
+}
+
+bool event_occurs_on(const Event* event, int year, int month, int day) {
+    long target = days_since_epoch(year, month, day);
+    long start = days_since_epoch(event->year, event->month, event->day);
+    long span = event_span_days(event);
+
+    if (!event->is_recurring) {
+        return target >= start && target < start + span;
+    }
+
+    // An occurrence covers `span` days from its start, so look back that far for a starting occurrence
+    int y = year, m = month, d = day;
+    for (long k = 0; k < span && target - k >= start; k++) {
+        if (occurrence_starts_on(event, y, m, d)) return true;
+        previous_day(&y, &m, &d);
+    }
+    return false;
 }
 
 void calendar_free_events(CalendarState* cal) {
     Event* current = cal->events_head;
     while (current != NULL) {
         Event* next = current->next;
+        event_release_lists(current);
         free(current);
         current = next;
     }

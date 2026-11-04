@@ -14,7 +14,8 @@ A lightweight, keyboard-driven terminal calendar for Linux built with C and Ncur
   - Generates mandatory `UID` and UTC `DTSTAMP` timestamps.
   - Adheres to standard all-day non-inclusive `DTEND` calculations.
   - Multi-line text escaping and unescaping (`\n`).
-  - Supports recurring events (`RRULE` with daily, weekly, monthly, and yearly frequencies, intervals, weekday specifications including ordinals such as `1MO` or `-1FR`, and `UNTIL` / `COUNT` limits).
+  - Supports recurring events: `RRULE` with daily, weekly, monthly, and yearly frequencies, `INTERVAL`, `BYDAY` (including ordinals such as `1MO` or `-1FR`), `BYMONTH`, `BYMONTHDAY` (including negative values), `BYSETPOS` (up to 8 values), `UNTIL` and `COUNT`, plus `EXDATE`, `RDATE`, and `RECURRENCE-ID` overrides.
+  - Timed events are exported as floating wall-clock time (see [File Format & Standards](#file-format--standards)).
 - **Interactive Event Dialogs:** View, inspect, scroll through multi-line descriptions, and delete events directly from the UI.
 - **Theming:** Built-in color themes to fit different terminal palettes.
 - **Session Persistence:** Automatically remembers and reloads the last used `.ics` file.
@@ -72,6 +73,7 @@ Press **e** to add an event on the selected day:
 3. For repeating events, a checkbox dialog appears (**Up / Down** to move, **Space** to toggle, **Enter** to confirm):
    - `[ ] Every 2 weeks` (or months or years): when checked, the event repeats every second week (month, year). When unchecked, it repeats every week (month, year).
    - `[ ] Ends on a date`: when unchecked, the event repeats forever. When checked, you enter an end date as `YYYY-MM-DD`.
+4. A **Time** checkbox dialog appears. Leave it unchecked for an all-day event. When checked, enter a start time as `HH:MM` (00:00 to 23:59), then an optional end time as `HH:MM` that must be later than the start. Leave the end time blank for no end time.
 
 **Esc** at any step cancels the event. Repeating events are saved in the `.ics` export as standard `RRULE` rules.
 
@@ -97,6 +99,12 @@ END:VEVENT
 END:VCALENDAR
 ```
 
+### Timed Events
+
+Timed events are exported with floating wall-clock time: `DTSTART:20261115T093000` with no `Z` suffix and no `TZID`. Viewers show them at the same clock time in whatever timezone they use. Multi-day all-day events are exported with an exclusive `DTEND`, and every day they cover is shown in Microcal.
+
+In the side panel and day view, a timed event shows as `HH:MM` or `HH:MM-HH:MM`, with ` +N day(s)` added when the end falls on a later day. A timed event that runs past midnight is listed on its start day only. The day view lists events in the order they were stored, not sorted by time.
+
 ### Import Behaviour
 
 - **Replace by UID:** An imported event whose `UID` matches an existing event replaces it. Events absent from the file are kept.
@@ -106,9 +114,11 @@ END:VCALENDAR
 - **Sub-daily frequencies** (`HOURLY`, `MINUTELY`, `SECONDLY`) are imported as `DAILY`.
 - **Durations:** `DURATION` is used when `DTEND` is absent.
 - **Alarms:** `VALARM` blocks are skipped, so they cannot overwrite the event's `SUMMARY` or `DESCRIPTION`.
-- **Timed events** become all-day events on their start date, since Microcal stores dates only. The time is not kept.
+- **Timed events** keep their start and optional end time. A `TZID` or `Z` suffix is dropped, so the clock digits are kept but the zone is not. Times can shift in other timezones.
+- **Overrides:** A `RECURRENCE-ID` event is imported under the UID `base#YYYYMMDD`. On export it is written as a standalone event, and the master event gets an `EXDATE` for that day.
+- **EXDATE and RDATE** match by date only, and the time part is ignored.
 
-**Not supported** (the rule is imported without these parts): `RECURRENCE-ID`, `EXDATE`, `RDATE`, `BYSETPOS`, `BYHOUR`, negative `BYMONTHDAY`, and multiple values in `BYMONTH` or `BYMONTHDAY` (only the first value is used).
+**Not supported** (these parts of a rule are ignored): `BYHOUR`, `BYMINUTE`, `BYSECOND`, `BYWEEKNO`, `BYYEARDAY`, `RANGE=THISANDFUTURE`, and `BYSETPOS` values beyond the first 8. `UNTIL` is compared by date only, so its time part is ignored.
 
 ---
 

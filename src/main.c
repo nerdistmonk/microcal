@@ -34,6 +34,40 @@ static bool parse_repeat_until(const char* text, int start_y, int start_m, int s
     return true;
 }
 
+// Accepts HH:MM (24-hour); stores minutes since midnight
+static bool parse_time_of_day(const char* text, int* minute) {
+    int hh = 0, mm = 0, consumed = 0;
+    if (sscanf(text, "%d:%d%n", &hh, &mm, &consumed) != 2 || text[consumed] != '\0') return false;
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return false;
+    *minute = hh * 60 + mm;
+    return true;
+}
+
+// Prompts for a start time and an optional end time on the same day. Returns false if cancelled.
+static bool prompt_event_time(int* start_minute, int* end_minute) {
+    char text[8];
+    for (;;) {
+        text[0] = '\0';
+        if (!ui_show_prompt("Start time", "Start time (HH:MM)", text, sizeof(text))) return false;
+        if (parse_time_of_day(text, start_minute)) break;
+        ui_show_message("Invalid time", "Enter a time as HH:MM, from 00:00 to 23:59.");
+    }
+    for (;;) {
+        text[0] = '\0';
+        if (!ui_show_prompt_optional("End time", "End time (HH:MM, blank for none)", text, sizeof(text))) return false;
+        if (text[0] == '\0') {
+            *end_minute = -1;
+            return true;
+        }
+        int candidate = 0;
+        if (parse_time_of_day(text, &candidate) && candidate > *start_minute) {
+            *end_minute = candidate;
+            return true;
+        }
+        ui_show_message("Invalid time", "Enter a time later than the start time, or leave it blank.");
+    }
+}
+
 static void add_event_dialog(CalendarState* cal) {
     char title_buf[MAX_TITLE_LEN] = {0};
     if (!ui_show_prompt("New Event", "Enter event title", title_buf, sizeof(title_buf))) return;
@@ -60,11 +94,7 @@ static void add_event_dialog(CalendarState* cal) {
     int choice = ui_show_choice("Repeat", options, OPT_COUNT, OPT_NONE);
     if (choice < 0) return;
 
-    if (choice == OPT_NONE) {
-        calendar_add_event(cal, title_buf, "", year, month, day, NULL);
-        ui_show_message("Success", "Event added successfully!");
-        return;
-    }
+    bool repeats = choice != OPT_NONE;
 
     RecurrenceRule rule;
     memset(&rule, 0, sizeof(rule));
@@ -77,44 +107,61 @@ static void add_event_dialog(CalendarState* cal) {
         rule.ordinal_mask[wd] = ORDINAL_ALL;
     } else if (choice == OPT_MONTH_DAY) {
         rule.type = RECUR_MONTHLY;
-        rule.day_of_month = day;
+        rule.mday_mask = MDAY_BIT(day);
     } else if (choice == OPT_MONTH_NTH) {
         rule.type = RECUR_MONTHLY;
         rule.day_of_week_mask = 1 << wd;
         rule.ordinal_mask[wd] = recurrence_ordinal_bit(nth);
-    } else {
+    } else if (choice == OPT_YEARLY) {
         rule.type = RECUR_YEARLY;
-        rule.month_of_year = month;
-        rule.day_of_month = day;
+        rule.month_mask = MONTH_BIT(month);
+        rule.mday_mask = MDAY_BIT(day);
     }
 
-    const char* unit = choice == OPT_WEEKLY ? "weeks" : (choice == OPT_YEARLY ? "years" : "months");
-    char every_label[32];
-    snprintf(every_label, sizeof(every_label), "Every 2 %s", unit);
-    const char* labels[2] = { every_label, "Ends on a date" };
-    bool checked[2] = { false, false };
-    if (!ui_show_checkboxes("Repeat options", labels, checked, 2)) return;
+    if (repeats) {
+        const char* unit = choice == OPT_WEEKLY ? "weeks" : (choice == OPT_YEARLY ? "years" : "months");
+        char every_label[32];
+        snprintf(every_label, sizeof(every_label), "Every 2 %s", unit);
+        const char* labels[2] = { every_label, "Ends on a date" };
+        bool checked[2] = { false, false };
+        if (!ui_show_checkboxes("Repeat options", labels, checked, 2)) return;
 
-    if (checked[0]) rule.interval = 2;
+        if (checked[0]) rule.interval = 2;
 
-    if (checked[1]) {
-        char text[16];
-        for (;;) {
-            text[0] = '\0';
-            if (!ui_show_prompt("Repeat", "Ends on YYYY-MM-DD", text, sizeof(text))) return;
-            int until_y, until_m, until_d;
-            if (parse_repeat_until(text, year, month, day, &until_y, &until_m, &until_d)) {
-                rule.has_until = true;
-                rule.until_year = until_y;
-                rule.until_month = until_m;
-                rule.until_day = until_d;
-                break;
+        if (checked[1]) {
+            char text[16];
+            for (;;) {
+                text[0] = '\0';
+                if (!ui_show_prompt("Repeat", "Ends on YYYY-MM-DD", text, sizeof(text))) return;
+                int until_y, until_m, until_d;
+                if (parse_repeat_until(text, year, month, day, &until_y, &until_m, &until_d)) {
+                    rule.has_until = true;
+                    rule.until_year = until_y;
+                    rule.until_month = until_m;
+                    rule.until_day = until_d;
+                    break;
+                }
+                ui_show_message("Invalid date", "Enter a date as YYYY-MM-DD, on or after the event date.");
             }
-            ui_show_message("Invalid date", "Enter a date as YYYY-MM-DD, on or after the event date.");
         }
     }
 
-    calendar_add_event(cal, title_buf, "", year, month, day, &rule);
+    const char* time_labels[1] = { "Set a time (start, optional end)" };
+    bool time_checked[1] = { false };
+    if (!ui_show_checkboxes("Time", time_labels, time_checked, 1)) return;
+
+    int start_minute = 0;
+    int end_minute = -1;
+    if (time_checked[0] && !prompt_event_time(&start_minute, &end_minute)) return;
+
+    Event* event = calendar_add_event(cal, title_buf, "", year, month, day, repeats ? &rule : NULL);
+    if (!event) {
+        ui_show_message("Error", "Could not add the event.");
+        return;
+    }
+    if (time_checked[0]) {
+        calendar_event_set_timed(event, start_minute, year, month, day, end_minute);
+    }
     ui_show_message("Success", "Event added successfully!");
 }
 
