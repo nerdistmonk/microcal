@@ -338,6 +338,7 @@ static bool next_rrule_int(const char** p, int* value, bool* valid) {
 #define DROP_BYYEARDAY (1u << 5)
 #define DROP_SETPOS (1u << 6)
 #define DROP_RANGE (1u << 7)
+#define DROP_UNKNOWN_ZONE (1u << 8)
 
 // Parses an RRULE line into rule. Unsupported parts (BYHOUR, BYWEEKNO, ...) are ignored and returned in the mask.
 // UNTIL is converted into frame, the zone of the event's start.
@@ -715,6 +716,7 @@ static const struct {
     {DROP_BYYEARDAY, "BYYEARDAY"},
     {DROP_SETPOS, "BYSETPOS beyond 8"},
     {DROP_RANGE, "RANGE=THISANDFUTURE"},
+    {DROP_UNKNOWN_ZONE, "unrecognised TZID"},
 };
 
 // Appends text to a NUL-terminated buffer, dropping it when it does not fit
@@ -781,6 +783,11 @@ int calendar_check_ics_rules(const char* filepath, char* report, size_t report_s
             }
             in_event = false;
         } else if (in_event && !in_alarm) {
+            char zone[128];
+            if (property_tzid(line, line + strlen(line), zone, sizeof(zone)) != NULL && strcmp(zone, "UTC") != 0 &&
+                !zone_is_known(zone)) {
+                dropped |= DROP_UNKNOWN_ZONE;
+            }
             if (strncmp(line, "SUMMARY:", 8) == 0) {
                 copy_utf8_truncated(title, sizeof(title), line + 8);
             } else if (strncmp(line, "RRULE:", 6) == 0) {

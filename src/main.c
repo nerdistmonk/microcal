@@ -51,8 +51,9 @@ static bool confirm_rule_conversion(const char* path) {
 
     char message[1200];
     snprintf(message, sizeof(message),
-             "%d event(s) use rule parts Microcal does not support:\n%s"
-             "Importing removes these parts. Sub-daily rules become daily.",
+             "%d event(s) use settings Microcal cannot import exactly:\n%s"
+             "Import ignores these: sub-daily rules become daily,\n"
+             "and unknown time zones become local time.",
              affected, report);
     ui_show_message("Unsupported rules", message);
 

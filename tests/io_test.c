@@ -503,16 +503,22 @@ static void test_rule_check(void) {
         "SUMMARY:Override", "RECURRENCE-ID;RANGE=THISANDFUTURE:20260108T090000", "END:VEVENT",
         "BEGIN:VEVENT", "UID:setpos-1", "DTSTAMP:20260101T000000Z", "DTSTART:20260109T090000",
         "SUMMARY:Many", "RRULE:FREQ=MONTHLY;BYDAY=MO;BYSETPOS=1,2,3,4,5,6,7,8,9", "END:VEVENT",
+        "BEGIN:VEVENT", "UID:zone-1", "DTSTAMP:20260101T000000Z", "DTSTART;TZID=Custom Zone:20260110T090000",
+        "SUMMARY:Custom", "END:VEVENT",
+        "BEGIN:VEVENT", "UID:known-zone-1", "DTSTAMP:20260101T000000Z",
+        "DTSTART;TZID=America/New_York:20260111T090000", "SUMMARY:Known", "END:VEVENT",
         "END:VCALENDAR", NULL
     };
     CHECK(write_lines("rules.ics", lines));
     char report[1024];
-    CHECK(calendar_check_ics_rules("rules.ics", report, sizeof(report)) == 4);
+    CHECK(calendar_check_ics_rules("rules.ics", report, sizeof(report)) == 5);
     CHECK(strstr(report, "- Standup: BYHOUR\n") != NULL);
     CHECK(strstr(report, "- Ticks: sub-daily FREQ\n") != NULL);
     CHECK(strstr(report, "- Override: RANGE=THISANDFUTURE\n") != NULL);
     CHECK(strstr(report, "- Many: BYSETPOS beyond 8\n") != NULL);
+    CHECK(strstr(report, "- Custom: unrecognised TZID\n") != NULL);
     CHECK(strstr(report, "Plain") == NULL);
+    CHECK(strstr(report, "Known") == NULL);
     CHECK(calendar_check_ics_rules("missing.ics", report, sizeof(report)) == -1);
 }
 

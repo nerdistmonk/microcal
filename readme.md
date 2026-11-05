@@ -122,7 +122,7 @@ In the side panel and day view, a timed event shows as `HH:MM` or `HH:MM-HH:MM`,
 - **EXDATE and RDATE** match by date only, after the same conversion as DTSTART. The time part is ignored.
 - **RECURRENCE-ID** is read in its own event's zone, which is treated as the master's zone.
 
-**Not supported** (these parts of a rule are ignored): `BYHOUR`, `BYMINUTE`, `BYSECOND`, `BYWEEKNO`, `BYYEARDAY`, `RANGE=THISANDFUTURE`, and `BYSETPOS` values beyond the first 8. Sub-daily `FREQ` values (`HOURLY`, `MINUTELY`, `SECONDLY`) become `DAILY`. `UNTIL` is compared by date only. A `Z` UNTIL is converted into the event's start zone first, then only its date is used.
+**Not supported** (these parts of a rule are ignored): `BYHOUR`, `BYMINUTE`, `BYSECOND`, `BYWEEKNO`, `BYYEARDAY`, `RANGE=THISANDFUTURE`, and `BYSETPOS` values beyond the first 8. Sub-daily `FREQ` values (`HOURLY`, `MINUTELY`, `SECONDLY`) become `DAILY`. `UNTIL` is compared by date only. A `Z` UNTIL is converted into the event's start zone first, then only its date is used. A `TZID` that is not a zone file on this machine (for example a custom Outlook zone name) is imported as a local time, and its `VTIMEZONE` is ignored.
 
 When an import contains any of these, Microcal lists up to 5 affected events and asks whether to continue. "Import with converted rules" applies the conversion above, and "Cancel" makes no changes. The startup import asks the same way, and cancelling it starts with an empty calendar.
 
