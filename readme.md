@@ -138,4 +138,4 @@ When an import contains any of these, Microcal lists up to 5 affected events and
 
 ## License
 
-MIT License. Feel free to modify and distribute.
+Licensed under GPL-2
