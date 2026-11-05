@@ -1091,43 +1091,154 @@ static bool same_observance(const ZoneOffset* states, size_t i, size_t k) {
            observance_from(states, i) == observance_from(states, k);
 }
 
-// Writes STANDARD and DAYLIGHT observances. Each distinct observance starts at its first change (DTSTART) and lists
-// its later changes as RDATE.
-static void write_zone_observances(FILE* file, const ZoneOffset* states, size_t count) {
+// A change's local date in its from offset, as the nth weekday of its month (nth -1 is the last one)
+typedef struct {
+    int year;
+    int month;
+    int nth;
+    int weekday; // 0 = Sunday
+    int seconds; // Local time of day
+} TransitionPattern;
+
+static const char* const weekday_codes[] = {"SU", "MO", "TU", "WE", "TH", "FR", "SA"};
+
+// Shortest run of yearly transitions that is written as an RRULE
+#define TAIL_MIN_YEARS 5
+// Years past the window that a candidate RRULE must reproduce before it is written
+#define TAIL_CHECK_YEARS 60
+
+static bool transition_pattern(const ZoneOffset* state, long from, TransitionPattern* pattern) {
+    time_t local = state->instant + from;
+    struct tm* wall = gmtime(&local);
+    if (wall == NULL) return false;
+    pattern->year = wall->tm_year + 1900;
+    pattern->month = wall->tm_mon + 1;
+    pattern->weekday = wall->tm_wday;
+    pattern->seconds = wall->tm_hour * 3600 + wall->tm_min * 60 + wall->tm_sec;
+    // A date in the last seven days of the month is the last such weekday
+    pattern->nth = wall->tm_mday + 7 > days_in_month(pattern->year, pattern->month) ? -1 : (wall->tm_mday - 1) / 7 + 1;
+    return true;
+}
+
+static bool same_pattern(const TransitionPattern* a, const TransitionPattern* b) {
+    return a->month == b->month && a->nth == b->nth && a->weekday == b->weekday && a->seconds == b->seconds;
+}
+
+// Finds the tail of a group's changes that repeats one pattern every year up to last_year. Returns the index of the
+// tail's first change, or count when the tail is too short or does not exist.
+static size_t rule_tail_start(const ZoneOffset* states, size_t count, size_t first, int last_year,
+                              TransitionPattern* rule) {
+    long from = observance_from(states, first);
+    int expected_year = last_year;
+    size_t run = 0;
+    size_t start = count;
+    for (size_t k = count; k > first; k--) {
+        size_t index = k - 1;
+        if (!same_observance(states, first, index)) continue;
+        TransitionPattern pattern;
+        if (!transition_pattern(&states[index], from, &pattern) || pattern.year != expected_year) break;
+        if (run == 0) {
+            *rule = pattern;
+        } else if (!same_pattern(&pattern, rule)) {
+            break;
+        }
+        expected_year--;
+        run++;
+        start = index;
+    }
+    return run >= TAIL_MIN_YEARS ? start : count;
+}
+
+// Writes one STANDARD or DAYLIGHT observance that starts at states[dtstart]. Without rrule, the other changes in
+// (dtstart, end) of the same observance are listed as RDATE.
+static void write_observance_block(FILE* file, const ZoneOffset* states, size_t dtstart, size_t end,
+                                   const char* rrule) {
+    long from = observance_from(states, dtstart);
+    char from_text[32];
+    char to_text[32];
+    format_utc_offset(from_text, sizeof(from_text), from);
+    format_utc_offset(to_text, sizeof(to_text), states[dtstart].offset);
+    const char* kind = states[dtstart].is_dst ? "DAYLIGHT" : "STANDARD";
+
+    fprintf(file, "BEGIN:%s\r\n", kind);
+    write_local_datetime(file, "DTSTART", states[dtstart].instant, from);
+    fprintf(file, "TZOFFSETFROM:%s\r\n", from_text);
+    fprintf(file, "TZOFFSETTO:%s\r\n", to_text);
+    if (rrule != NULL) {
+        fprintf(file, "RRULE:%s\r\n", rrule);
+    } else {
+        for (size_t k = dtstart + 1; k < end; k++) {
+            if (same_observance(states, dtstart, k)) write_local_datetime(file, "RDATE", states[k].instant, from);
+        }
+    }
+    fprintf(file, "END:%s\r\n", kind);
+}
+
+// True when the tail's rule reproduces the zone's real change in each of the TAIL_CHECK_YEARS years after last_year.
+// This rejects rules that drift from the observed pattern, such as a last-Thursday change whose Friday falls in the
+// next month in some year.
+static bool rule_holds_after(const char* zone, int last_year, const ZoneOffset* tail_state, long from,
+                             const TransitionPattern* rule) {
+    size_t count = 0;
+    ZoneOffset* later = zone_offset_states(zone, last_year + 1, last_year + TAIL_CHECK_YEARS, &count);
+    if (later == NULL) return false;
+    size_t changes = 0;
+    bool ok = true;
+    for (size_t i = 1; i < count && ok; i++) {
+        bool same = later[i].is_dst == tail_state->is_dst && later[i].offset == tail_state->offset &&
+                    later[i - 1].offset == from;
+        if (!same) continue;
+        TransitionPattern pattern;
+        ok = transition_pattern(&later[i], from, &pattern) && same_pattern(&pattern, rule);
+        changes++;
+    }
+    free(later);
+    return ok && changes == TAIL_CHECK_YEARS;
+}
+
+// Writes the observances of the group starting at first. Its changes are listed explicitly, except that a tail
+// repeating one pattern through last_year is written as a yearly RRULE, so the zone continues past the window.
+static void write_observance_group(FILE* file, const char* zone, const ZoneOffset* states, size_t count, size_t first,
+                                   int last_year) {
+    TransitionPattern rule = {0, 0, 0, 0, 0};
+    size_t tail = rule_tail_start(states, count, first, last_year, &rule);
+    if (tail != count && !rule_holds_after(zone, last_year, &states[first], observance_from(states, first), &rule)) {
+        tail = count;
+    }
+    if (tail == count) {
+        write_observance_block(file, states, first, count, NULL);
+        return;
+    }
+    if (tail > first) write_observance_block(file, states, first, tail, NULL);
+
+    char rrule[64];
+    snprintf(rrule, sizeof(rrule), "FREQ=YEARLY;BYMONTH=%d;BYDAY=%d%s", rule.month, rule.nth,
+             weekday_codes[rule.weekday]);
+    write_observance_block(file, states, tail, count, rrule);
+}
+
+// Writes STANDARD and DAYLIGHT observances for every distinct observance, ending the window at last_year
+static void write_zone_observances(FILE* file, const char* zone, const ZoneOffset* states, size_t count,
+                                   int last_year) {
     for (size_t i = 0; i < count; i++) {
         bool written = false;
         for (size_t j = 0; j < i && !written; j++) {
             written = same_observance(states, j, i);
         }
-        if (written) continue;
-
-        long from = observance_from(states, i);
-        char from_text[32];
-        char to_text[32];
-        format_utc_offset(from_text, sizeof(from_text), from);
-        format_utc_offset(to_text, sizeof(to_text), states[i].offset);
-        const char* kind = states[i].is_dst ? "DAYLIGHT" : "STANDARD";
-
-        fprintf(file, "BEGIN:%s\r\n", kind);
-        write_local_datetime(file, "DTSTART", states[i].instant, from);
-        fprintf(file, "TZOFFSETFROM:%s\r\n", from_text);
-        fprintf(file, "TZOFFSETTO:%s\r\n", to_text);
-        for (size_t k = i + 1; k < count; k++) {
-            if (same_observance(states, i, k)) write_local_datetime(file, "RDATE", states[k].instant, from);
-        }
-        fprintf(file, "END:%s\r\n", kind);
+        if (!written) write_observance_group(file, zone, states, count, i, last_year);
     }
 }
 
-// Writes a VTIMEZONE for zone, covering from_year through to_year
-static void write_timezone(FILE* file, const char* zone, int from_year, int to_year) {
+// Writes a VTIMEZONE for zone, covering from_year through to_year. Returns false if it could not be built.
+static bool write_timezone(FILE* file, const char* zone, int from_year, int to_year) {
     size_t count = 0;
     ZoneOffset* states = zone_offset_states(zone, from_year, to_year, &count);
-    if (states == NULL) return;
+    if (states == NULL) return false;
     fprintf(file, "BEGIN:VTIMEZONE\r\nTZID:%s\r\n", zone);
-    write_zone_observances(file, states, count);
+    write_zone_observances(file, zone, states, count, to_year);
     fprintf(file, "END:VTIMEZONE\r\n");
     free(states);
+    return true;
 }
 
 // Widens the VTIMEZONE year range so it includes year, with a year of margin on each side
@@ -1169,9 +1280,10 @@ bool calendar_export_ics(const CalendarState* cal, const char* filepath) {
 
     // Each zone used by a timed event gets a VTIMEZONE covering the years the events touch
     StringList zones = {NULL, 0, 0};
+    bool ok = true;
     int from_year = 1970;
     int to_year = 2037;
-    for (const Event* ev = cal->events_head; ev != NULL; ev = ev->next) {
+    for (const Event* ev = cal->events_head; ev != NULL && ok; ev = ev->next) {
         if (!ev->is_timed) continue;
         include_year(&from_year, &to_year, ev->year);
         if (ev->end_year > 0) include_year(&from_year, &to_year, ev->end_year);
@@ -1185,13 +1297,18 @@ bool calendar_export_ics(const CalendarState* cal, const char* filepath) {
         for (size_t i = 0; i < zones.count && !listed; i++) {
             listed = strcmp(zones.items[i], zone) == 0;
         }
-        if (!listed && !string_list_add(&zones, zone)) break;
+        if (!listed && !string_list_add(&zones, zone)) ok = false;
     }
-    for (size_t i = 0; i < zones.count; i++) {
-        write_timezone(file, zones.items[i], from_year, to_year);
+    for (size_t i = 0; ok && i < zones.count; i++) {
+        ok = write_timezone(file, zones.items[i], from_year, to_year);
     }
     string_list_clear(&zones);
     free(zones.items);
+    if (!ok) {
+        fclose(file);
+        remove(clean_path);
+        return false;
+    }
 
     Event* current = cal->events_head;
     while (current != NULL) {

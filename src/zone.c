@@ -58,29 +58,45 @@ static void leave_zone(char* saved) {
     free(saved);
 }
 
-bool zone_to_instant(int y, int m, int d, int minute, const char* zone, time_t* instant) {
-    struct tm tm;
-    memset(&tm, 0, sizeof(tm));
-    tm.tm_year = y - 1900;
-    tm.tm_mon = m - 1;
-    tm.tm_mday = d;
-    tm.tm_hour = minute / 60;
-    tm.tm_min = minute % 60;
-    tm.tm_isdst = -1;
+static long long days_from_civil(long long y, int m, int d);
+static bool offset_state_at(time_t instant, ZoneOffset* state);
 
-    time_t result;
-    if (zone[0] == '\0') {
-        result = mktime(&tm);
-    } else {
-        char* saved;
-        if (!enter_zone(zone, &saved)) return false;
-        result = mktime(&tm);
-        leave_zone(saved);
+// A wall-clock time that exists once is taken at its only offset. A time in a gap (skipped by a forward change) uses the
+// offset from before the change. A time that occurs twice (repeated by a backward change) uses the earlier instant.
+static bool resolve_local_time(long long local, time_t* instant) {
+    // Offsets just before and just after the local time, which are the only two that can apply to it
+    ZoneOffset before;
+    ZoneOffset after;
+    if (!offset_state_at((time_t)(local - 86400), &before)) return false;
+    if (!offset_state_at((time_t)(local + 86400), &after)) return false;
+
+    bool found = false;
+    time_t best = 0;
+    const long offsets[2] = {before.offset, after.offset};
+    for (int i = 0; i < 2; i++) {
+        time_t candidate = (time_t)(local - offsets[i]);
+        ZoneOffset check;
+        if (!offset_state_at(candidate, &check)) return false;
+        if (check.offset == offsets[i] && (!found || candidate < best)) {
+            best = candidate;
+            found = true;
+        }
     }
 
-    if (result == (time_t)-1) return false;
-    *instant = result;
+    *instant = found ? best : (time_t)(local - before.offset);
     return true;
+}
+
+bool zone_to_instant(int y, int m, int d, int minute, const char* zone, time_t* instant) {
+    long long local = days_from_civil(y, m, d) * 86400LL + minute * 60LL;
+
+    if (zone[0] == '\0') return resolve_local_time(local, instant);
+
+    char* saved;
+    if (!enter_zone(zone, &saved)) return false;
+    bool ok = resolve_local_time(local, instant);
+    leave_zone(saved);
+    return ok;
 }
 
 bool zone_wall_clock(time_t instant, const char* zone, int* y, int* m, int* d, int* minute) {
@@ -133,8 +149,9 @@ static long long days_from_civil(long long y, int m, int d) {
     return era * 146097 + doe - 719468;
 }
 
-// Changes closer together than this are not detected
-#define OFFSET_SAMPLE_SECONDS 21600
+// Offset changes are found by sampling at this interval. The system zone data has no two changes closer than about a
+// week, so hourly sampling finds every change; a change pair closer than this would be missed.
+#define OFFSET_SAMPLE_SECONDS 3600
 
 // Reads the offset state at an instant. The zone must already be entered.
 static bool offset_state_at(time_t instant, ZoneOffset* state) {
