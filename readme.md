@@ -124,7 +124,7 @@ In the side panel and day view, a timed event shows as `HH:MM` or `HH:MM-HH:MM`,
 
 **Not supported** (these parts of a rule are ignored): `BYHOUR`, `BYMINUTE`, `BYSECOND`, `BYWEEKNO`, `BYYEARDAY`, `RANGE=THISANDFUTURE`, and `BYSETPOS` values beyond the first 8. Sub-daily `FREQ` values (`HOURLY`, `MINUTELY`, `SECONDLY`) become `DAILY`. `UNTIL` is compared by date only. A `Z` UNTIL is converted into the event's start zone first, then only its date is used.
 
-When an import contains any of these, Microcal lists up to 5 affected events and asks whether to continue. "Import with converted rules" applies the conversion above, and "Cancel" makes no changes. The startup import asks the same way.
+When an import contains any of these, Microcal lists up to 5 affected events and asks whether to continue. "Import with converted rules" applies the conversion above, and "Cancel" makes no changes. The startup import asks the same way, and cancelling it starts with an empty calendar.
 
 ---
 

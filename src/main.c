@@ -197,13 +197,16 @@ int main(void) {
 
     char last_file[512] = {0};
     bool loaded = false;
+    bool cancelled = false;
     if (calendar_get_last_filepath(last_file, sizeof(last_file))) {
-        if (confirm_rule_conversion(last_file) && calendar_import_ics(&cal, last_file)) {
+        if (!confirm_rule_conversion(last_file)) {
+            cancelled = true;
+        } else if (calendar_import_ics(&cal, last_file)) {
             loaded = true;
         }
     }
 
-    if (!loaded) {
+    if (!loaded && !cancelled) {
         calendar_add_event(&cal, "Project Kickoff", "Initial release of Microcal", 2026, 11, 15, NULL);
     }
 
