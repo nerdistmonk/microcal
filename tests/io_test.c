@@ -21,7 +21,7 @@ static int failures = 0;
 
 // Files the tests create in their scratch directory
 static const char* const scratch_files[] = {
-    "in.ics", "rt.ics", "vt.ics", "plain.ics", "folding.ics", "full.ics", ".microcal_last", NULL
+    "in.ics", "rt.ics", "vt.ics", "plain.ics", "folding.ics", "full.ics", "rules.ics", ".microcal_last", NULL
 };
 
 static bool write_lines(const char* path, const char* const* lines) {
@@ -490,6 +490,32 @@ static void test_failure_paths(void) {
     calendar_free_events(&cal);
 }
 
+static void test_rule_check(void) {
+    const char* lines[] = {
+        "BEGIN:VCALENDAR", "VERSION:2.0",
+        "BEGIN:VEVENT", "UID:byhour-1", "DTSTAMP:20260101T000000Z", "DTSTART:20260105T090000",
+        "SUMMARY:Standup", "RRULE:FREQ=WEEKLY;BYHOUR=9,17", "END:VEVENT",
+        "BEGIN:VEVENT", "UID:plain-1", "DTSTAMP:20260101T000000Z", "DTSTART:20260106T090000",
+        "SUMMARY:Plain", "RRULE:FREQ=WEEKLY;BYDAY=TU", "END:VEVENT",
+        "BEGIN:VEVENT", "UID:subdaily-1", "DTSTAMP:20260101T000000Z", "DTSTART:20260107T090000",
+        "SUMMARY:Ticks", "RRULE:FREQ=HOURLY;COUNT=3", "END:VEVENT",
+        "BEGIN:VEVENT", "UID:range-1", "DTSTAMP:20260101T000000Z", "DTSTART:20260108T090000",
+        "SUMMARY:Override", "RECURRENCE-ID;RANGE=THISANDFUTURE:20260108T090000", "END:VEVENT",
+        "BEGIN:VEVENT", "UID:setpos-1", "DTSTAMP:20260101T000000Z", "DTSTART:20260109T090000",
+        "SUMMARY:Many", "RRULE:FREQ=MONTHLY;BYDAY=MO;BYSETPOS=1,2,3,4,5,6,7,8,9", "END:VEVENT",
+        "END:VCALENDAR", NULL
+    };
+    CHECK(write_lines("rules.ics", lines));
+    char report[1024];
+    CHECK(calendar_check_ics_rules("rules.ics", report, sizeof(report)) == 4);
+    CHECK(strstr(report, "- Standup: BYHOUR\n") != NULL);
+    CHECK(strstr(report, "- Ticks: sub-daily FREQ\n") != NULL);
+    CHECK(strstr(report, "- Override: RANGE=THISANDFUTURE\n") != NULL);
+    CHECK(strstr(report, "- Many: BYSETPOS beyond 8\n") != NULL);
+    CHECK(strstr(report, "Plain") == NULL);
+    CHECK(calendar_check_ics_rules("missing.ics", report, sizeof(report)) == -1);
+}
+
 int main(void) {
     char dir[] = "/tmp/microcal_io_test_XXXXXX";
     if (mkdtemp(dir) == NULL || chdir(dir) != 0) {
@@ -511,6 +537,7 @@ int main(void) {
     test_export_round_trip();
     test_export_appends_ics();
     test_failure_paths();
+    test_rule_check();
 
     for (size_t i = 0; scratch_files[i] != NULL; i++) remove(scratch_files[i]);
     if (chdir("/") != 0) printf("could not leave scratch directory\n");

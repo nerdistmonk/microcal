@@ -329,10 +329,21 @@ static bool next_rrule_int(const char** p, int* value, bool* valid) {
     return true;
 }
 
-// Parses an RRULE line into rule. Unsupported parts (BYHOUR, BYWEEKNO, ...) are ignored. UNTIL is converted into
-// frame, the zone of the event's start.
-static void parse_rrule(const char* line, RecurrenceRule* rule, const char* frame) {
+// Rule parts that import drops or changes (see readme); parse_rrule returns them as a mask of these bits
+#define DROP_SUBDAILY (1u << 0)
+#define DROP_BYHOUR (1u << 1)
+#define DROP_BYMINUTE (1u << 2)
+#define DROP_BYSECOND (1u << 3)
+#define DROP_BYWEEKNO (1u << 4)
+#define DROP_BYYEARDAY (1u << 5)
+#define DROP_SETPOS (1u << 6)
+#define DROP_RANGE (1u << 7)
+
+// Parses an RRULE line into rule. Unsupported parts (BYHOUR, BYWEEKNO, ...) are ignored and returned in the mask.
+// UNTIL is converted into frame, the zone of the event's start.
+static unsigned parse_rrule(const char* line, RecurrenceRule* rule, const char* frame) {
     bool sub_daily = false;
+    unsigned dropped = 0;
     const char* v = rrule_value(line, "FREQ=");
     if (v) {
         if (value_is(v, "YEARLY")) {
@@ -347,8 +358,15 @@ static void parse_rrule(const char* line, RecurrenceRule* rule, const char* fram
             // The data model has no time of day, so sub-daily rules become a daily rule
             rule->type = RECUR_DAILY;
             sub_daily = true;
+            dropped |= DROP_SUBDAILY;
         }
     }
+
+    if (rrule_value(line, "BYHOUR=")) dropped |= DROP_BYHOUR;
+    if (rrule_value(line, "BYMINUTE=")) dropped |= DROP_BYMINUTE;
+    if (rrule_value(line, "BYSECOND=")) dropped |= DROP_BYSECOND;
+    if (rrule_value(line, "BYWEEKNO=")) dropped |= DROP_BYWEEKNO;
+    if (rrule_value(line, "BYYEARDAY=")) dropped |= DROP_BYYEARDAY;
 
     if ((v = rrule_value(line, "INTERVAL=")) != NULL) {
         int interval = atoi(v);
@@ -377,10 +395,13 @@ static void parse_rrule(const char* line, RecurrenceRule* rule, const char* fram
         bool valid = false;
         const char* p = v;
         while (next_rrule_int(&p, &x, &valid)) {
+            if (!valid) continue;
             bool in_range = (x >= 1 && x <= MAX_PERIOD_DAYS) || (x <= -1 && x >= -MAX_PERIOD_DAYS);
             // Positions beyond MAX_SETPOS are dropped (see readme)
-            if (valid && in_range && rule->setpos_count < MAX_SETPOS) {
+            if (in_range && rule->setpos_count < MAX_SETPOS) {
                 rule->setpos[rule->setpos_count++] = x;
+            } else {
+                dropped |= DROP_SETPOS;
             }
         }
     }
@@ -409,6 +430,7 @@ static void parse_rrule(const char* line, RecurrenceRule* rule, const char* fram
         rule->interval = 1;
         rule->count = 0;
     }
+    return dropped;
 }
 
 // Parses an RFC 5545 DURATION into seconds. Weeks and days come from the date part; hours, minutes and seconds
@@ -678,6 +700,108 @@ static bool string_list_add(StringList* list, const char* line) {
 static void string_list_clear(StringList* list) {
     for (size_t i = 0; i < list->count; i++) free(list->items[i]);
     list->count = 0;
+}
+
+// Names of the parts in the DROP_ bits, in report order
+static const struct {
+    unsigned bit;
+    const char* name;
+} dropped_part_names[] = {
+    {DROP_SUBDAILY, "sub-daily FREQ"},
+    {DROP_BYHOUR, "BYHOUR"},
+    {DROP_BYMINUTE, "BYMINUTE"},
+    {DROP_BYSECOND, "BYSECOND"},
+    {DROP_BYWEEKNO, "BYWEEKNO"},
+    {DROP_BYYEARDAY, "BYYEARDAY"},
+    {DROP_SETPOS, "BYSETPOS beyond 8"},
+    {DROP_RANGE, "RANGE=THISANDFUTURE"},
+};
+
+// Appends text to a NUL-terminated buffer, dropping it when it does not fit
+static void append_text(char* out, size_t size, const char* text) {
+    size_t used = strlen(out);
+    size_t len = strlen(text);
+    if (used + len + 1 > size) return;
+    memcpy(out + used, text, len + 1);
+}
+
+// Event titles listed by calendar_check_ics_rules before the rest are only counted
+#define RULE_REPORT_MAX_EVENTS 5
+
+int calendar_check_ics_rules(const char* filepath, char* report, size_t report_size) {
+    if (report_size > 0) report[0] = '\0';
+    FILE* file = fopen(filepath, "r");
+    if (!file) return -1;
+
+    char next[8192];
+    char line[8192] = "";
+    char title[MAX_TITLE_LEN] = "";
+    unsigned dropped = 0;
+    bool in_event = false;
+    bool in_alarm = false;
+    bool eof = false;
+    int affected = 0;
+
+    while (!eof) {
+        if (fgets(next, sizeof(next), file)) {
+            trim_newline(next);
+        } else {
+            eof = true;
+            next[0] = '\0';
+        }
+
+        // Handle unfolded lines (RFC 5545 §3.1)
+        if (next[0] == ' ' || next[0] == '\t') {
+            if (strlen(line) + strlen(next + 1) < sizeof(line)) strcat(line, next + 1);
+            continue;
+        }
+
+        if (strcmp(line, "BEGIN:VEVENT") == 0) {
+            in_event = true;
+            title[0] = '\0';
+            dropped = 0;
+        } else if (strcmp(line, "BEGIN:VALARM") == 0) {
+            in_alarm = true;
+        } else if (strcmp(line, "END:VALARM") == 0) {
+            in_alarm = false;
+        } else if (strcmp(line, "END:VEVENT") == 0) {
+            if (in_event && dropped != 0) {
+                affected++;
+                if (affected <= RULE_REPORT_MAX_EVENTS) {
+                    char names[160] = "";
+                    char entry[256];
+                    for (size_t i = 0; i < sizeof(dropped_part_names) / sizeof(dropped_part_names[0]); i++) {
+                        if (!(dropped & dropped_part_names[i].bit)) continue;
+                        append_text(names, sizeof(names), names[0] ? ", " : "");
+                        append_text(names, sizeof(names), dropped_part_names[i].name);
+                    }
+                    snprintf(entry, sizeof(entry), "- %.40s: %s\n", title[0] ? title : "(untitled)", names);
+                    append_text(report, report_size, entry);
+                }
+            }
+            in_event = false;
+        } else if (in_event && !in_alarm) {
+            if (strncmp(line, "SUMMARY:", 8) == 0) {
+                copy_utf8_truncated(title, sizeof(title), line + 8);
+            } else if (strncmp(line, "RRULE:", 6) == 0) {
+                RecurrenceRule rule;
+                memset(&rule, 0, sizeof(rule));
+                dropped |= parse_rrule(line, &rule, "");
+            } else if (strncmp(line, "RECURRENCE-ID", 13) == 0 && strstr(line, "RANGE=THISANDFUTURE") != NULL) {
+                dropped |= DROP_RANGE;
+            }
+        }
+
+        strcpy(line, next);
+    }
+
+    if (affected > RULE_REPORT_MAX_EVENTS) {
+        char more[64];
+        snprintf(more, sizeof(more), "...and %d more\n", affected - RULE_REPORT_MAX_EVENTS);
+        append_text(report, report_size, more);
+    }
+    fclose(file);
+    return affected;
 }
 
 bool calendar_import_ics(CalendarState* cal, const char* filepath) {

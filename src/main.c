@@ -43,6 +43,23 @@ static bool parse_time_of_day(const char* text, int* minute) {
     return true;
 }
 
+// Warns about rules that import will change in path, and asks whether to continue. Returns false if cancelled.
+static bool confirm_rule_conversion(const char* path) {
+    char report[1024];
+    int affected = calendar_check_ics_rules(path, report, sizeof(report));
+    if (affected <= 0) return true;
+
+    char message[1200];
+    snprintf(message, sizeof(message),
+             "%d event(s) use rule parts Microcal does not support:\n%s"
+             "Importing removes these parts. Sub-daily rules become daily.",
+             affected, report);
+    ui_show_message("Unsupported rules", message);
+
+    const char* options[] = {"Import with converted rules", "Cancel"};
+    return ui_show_choice("Unsupported rules", options, 2, 0) == 0;
+}
+
 // Prompts for a start time and an optional end time on the same day. Returns false if cancelled.
 static bool prompt_event_time(int* start_minute, int* end_minute) {
     char text[8];
@@ -181,7 +198,7 @@ int main(void) {
     char last_file[512] = {0};
     bool loaded = false;
     if (calendar_get_last_filepath(last_file, sizeof(last_file))) {
-        if (calendar_import_ics(&cal, last_file)) {
+        if (confirm_rule_conversion(last_file) && calendar_import_ics(&cal, last_file)) {
             loaded = true;
         }
     }
@@ -305,7 +322,9 @@ int main(void) {
         case KEY_F(2): {
             char path_buf[256] = "import.ics";
             if (ui_show_prompt("Import Calendar", "Enter filename to import (.ics)", path_buf, sizeof(path_buf))) {
-                if (calendar_import_ics(&cal, path_buf)) {
+                if (!confirm_rule_conversion(path_buf)) {
+                    ui_show_message("Import cancelled", "No changes were made.");
+                } else if (calendar_import_ics(&cal, path_buf)) {
                     calendar_save_last_filepath(path_buf);
                     ui_show_message("Success", "Calendar imported successfully!");
                 } else {

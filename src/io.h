@@ -8,6 +8,10 @@
 // Returns true on success, false on failure.
 bool calendar_import_ics(CalendarState* cal, const char* filepath);
 
+// Lists the events in a file whose rules use parts that import drops or changes. Fills report with one line per
+// event (up to a few, then a count of the rest). Returns the number of affected events, or -1 if the file cannot be read.
+int calendar_check_ics_rules(const char* filepath, char* report, size_t report_size);
+
 // Exports all events from the calendar state to a .ics / .ical file.
 // Automatically appends .ics if missing.
 // Returns true on success, false on failure.
