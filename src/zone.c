@@ -150,8 +150,8 @@ static long long days_from_civil(long long y, int m, int d) {
 }
 
 // Offset changes are found by sampling at this interval. The system zone data has no two changes closer than about a
-// week, so hourly sampling finds every change; a change pair closer than this would be missed.
-#define OFFSET_SAMPLE_SECONDS 3600
+// week, so daily sampling finds every change; a change pair closer than this would be missed.
+#define OFFSET_SAMPLE_SECONDS 86400
 
 // Reads the offset state at an instant. The zone must already be entered.
 static bool offset_state_at(time_t instant, ZoneOffset* state) {

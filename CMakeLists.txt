@@ -22,3 +22,9 @@ add_executable(microcal ${SOURCES})
 
 # Link ncurses
 target_link_libraries(microcal PRIVATE ${CURSES_LIBRARIES})
+
+enable_testing()
+
+add_executable(zone_test tests/zone_test.c src/zone.c)
+target_include_directories(zone_test PRIVATE src)
+add_test(NAME zone_test COMMAND zone_test)
