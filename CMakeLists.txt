@@ -28,3 +28,7 @@ enable_testing()
 add_executable(zone_test tests/zone_test.c src/zone.c)
 target_include_directories(zone_test PRIVATE src)
 add_test(NAME zone_test COMMAND zone_test)
+
+add_executable(io_test tests/io_test.c src/io.c src/calendar.c src/zone.c)
+target_include_directories(io_test PRIVATE src)
+add_test(NAME io_test COMMAND io_test)

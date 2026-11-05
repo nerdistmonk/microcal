@@ -1363,7 +1363,12 @@ bool calendar_export_ics(const CalendarState* cal, const char* filepath) {
     }
 
     fprintf(file, "END:VCALENDAR\r\n");
-    fclose(file);
+    bool written = ferror(file) == 0;
+    if (fclose(file) != 0) written = false;
+    if (!written) {
+        remove(clean_path);
+        return false;
+    }
 
     calendar_save_last_filepath(clean_path);
     return true;
