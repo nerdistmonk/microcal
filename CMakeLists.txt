@@ -14,6 +14,7 @@ set(SOURCES
     src/calendar.c
     src/io.c
     src/ui.c
+    src/zone.c
 )
 
 # Executable target

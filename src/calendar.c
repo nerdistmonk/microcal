@@ -4,6 +4,10 @@
 #include <stdio.h>
 #include <time.h>
 
+// Zone dates tried around a viewer's day. A zone can be up to a day ahead of or behind the viewer's date,
+// so the zone dates V-2..V+2 cover every zone date whose start can fall on the viewer's day.
+#define ZONE_CANDIDATE_DAYS 5
+
 static int g_event_id_counter = 1;
 
 // Copies src into dst (dst_size includes the terminator), cutting at a character boundary
@@ -121,6 +125,8 @@ Event* calendar_add_event_full(CalendarState* cal, const char* uid, const char* 
     event->is_timed = false;
     event->start_minute = 0;
     event->end_minute = -1;
+    event->zone[0] = '\0';
+    event->zone_span = 0;
     event->is_transparent = is_transparent;
     event->sequence = sequence;
     event->exdates.items = NULL;
@@ -198,6 +204,13 @@ bool calendar_event_set_timed(Event* event, int start_minute, int end_year, int 
     return true;
 }
 
+bool calendar_event_set_zone(Event* event, const char* zone, long long span_seconds) {
+    if (zone[0] == '\0' || strlen(zone) >= sizeof(event->zone)) return false;
+    copy_utf8_truncated(event->zone, sizeof(event->zone), zone);
+    event->zone_span = span_seconds;
+    return true;
+}
+
 // EXDATE and RDATE only take effect on recurring events, so an event without a rule becomes RECUR_NONE
 static void event_mark_recurring(Event* event) {
     if (event->is_recurring) return;
@@ -248,28 +261,27 @@ bool calendar_delete_event(CalendarState* cal, int event_id) {
 }
 
 int calendar_get_events_for_day(const CalendarState* cal, int year, int month, int day,
-                                Event* out_events[], int max_events) {
+                                EventOccurrence out[], int max_events) {
     int count = 0;
-    Event* curr = cal->events_head;
-    while (curr && count < max_events) {
-        if (event_occurs_on(curr, year, month, day)) {
-            out_events[count++] = curr;
+    for (Event* curr = cal->events_head; curr && count < max_events; curr = curr->next) {
+        EventOccurrence occs[ZONE_CANDIDATE_DAYS];
+        int n = calendar_event_occurrences_on(curr, year, month, day, occs, ZONE_CANDIDATE_DAYS);
+        for (int i = 0; i < n && count < max_events; i++) {
+            out[count++] = occs[i];
         }
-        curr = curr->next;
     }
     // Stable insertion sort: all-day events first, then timed events by start time
     for (int i = 1; i < count; i++) {
-        Event* ev = out_events[i];
-        int key = ev->is_timed ? ev->start_minute + 1 : 0;
+        EventOccurrence cur = out[i];
+        int key = cur.event->is_timed ? cur.start_minute + 1 : 0;
         int j = i;
         while (j > 0) {
-            Event* prev = out_events[j - 1];
-            int prev_key = prev->is_timed ? prev->start_minute + 1 : 0;
+            int prev_key = out[j - 1].event->is_timed ? out[j - 1].start_minute + 1 : 0;
             if (prev_key <= key) break;
-            out_events[j] = prev;
+            out[j] = out[j - 1];
             j--;
         }
-        out_events[j] = ev;
+        out[j] = cur;
     }
     return count;
 }
@@ -560,7 +572,8 @@ static bool occurrence_starts_on(const Event* event, int year, int month, int da
     return count_occurrences_through(event, target, p) <= r->count;
 }
 
-bool event_occurs_on(const Event* event, int year, int month, int day) {
+// Floating (no zone) events: the viewer's day falls within the event's span (multi-day all-day events cover days)
+static bool floating_occurs_on(const Event* event, int year, int month, int day) {
     long target = days_since_epoch(year, month, day);
     long start = days_since_epoch(event->year, event->month, event->day);
     long span = event_span_days(event);
@@ -576,6 +589,73 @@ bool event_occurs_on(const Event* event, int year, int month, int day) {
         previous_day(&y, &m, &d);
     }
     return false;
+}
+
+// Viewer-local days from a floating event's start to its end, capped at 99 (as the UI shows it)
+static int floating_end_days(const Event* event) {
+    long start = days_since_epoch(event->year, event->month, event->day);
+    long end = days_since_epoch(event->end_year, event->end_month, event->end_day);
+    if (end <= start) return 0;
+    return end - start > 99 ? 99 : (int)(end - start);
+}
+
+// Fills occ for a zoned timed occurrence whose zone-frame start date is zy/zm/zd. Returns false if the start
+// does not fall on the viewer's day vy/vm/vd.
+static bool zoned_occurrence_on_viewer_day(const Event* event, int zy, int zm, int zd,
+                                           int vy, int vm, int vd, EventOccurrence* occ) {
+    time_t start_instant;
+    if (!zone_to_instant(zy, zm, zd, event->start_minute, event->zone, &start_instant)) return false;
+
+    int sy, sm, sd, s_minute;
+    if (!zone_wall_clock(start_instant, "", &sy, &sm, &sd, &s_minute)) return false;
+    if (sy != vy || sm != vm || sd != vd) return false;
+
+    occ->event = event;
+    occ->start_minute = s_minute;
+    occ->end_minute = -1;
+    occ->end_days = 0;
+    if (event->end_minute >= 0) {
+        time_t end_instant = start_instant + (time_t)event->zone_span;
+        int ey, em, ed, e_minute;
+        if (!zone_wall_clock(end_instant, "", &ey, &em, &ed, &e_minute)) return false;
+        long days = days_since_epoch(ey, em, ed) - days_since_epoch(vy, vm, vd);
+        occ->end_minute = e_minute;
+        occ->end_days = days <= 0 ? 0 : (days > 99 ? 99 : (int)days);
+    }
+    return true;
+}
+
+int calendar_event_occurrences_on(const Event* event, int year, int month, int day,
+                                  EventOccurrence out[], int max_out) {
+    int count = 0;
+    if (max_out <= 0) return 0;
+
+    if (event->is_timed && event->zone[0] != '\0') {
+        // Zoned events recur in their own zone: test each zone date near the viewer's day, then map to viewer time
+        long viewer_day = days_since_epoch(year, month, day);
+        for (long z = viewer_day - ZONE_CANDIDATE_DAYS / 2; z <= viewer_day + ZONE_CANDIDATE_DAYS / 2 && count < max_out; z++) {
+            int zy, zm, zd;
+            ymd_from_day_number(z, &zy, &zm, &zd);
+            if (!occurrence_starts_on(event, zy, zm, zd)) continue;
+            EventOccurrence occ;
+            if (zoned_occurrence_on_viewer_day(event, zy, zm, zd, year, month, day, &occ)) {
+                out[count++] = occ;
+            }
+        }
+        return count;
+    }
+
+    if (!floating_occurs_on(event, year, month, day)) return 0;
+    out[0].event = event;
+    out[0].start_minute = event->start_minute;
+    out[0].end_minute = event->end_minute;
+    out[0].end_days = event->is_timed ? floating_end_days(event) : 0;
+    return 1;
+}
+
+bool event_occurs_on(const Event* event, int year, int month, int day) {
+    EventOccurrence occ;
+    return calendar_event_occurrences_on(event, year, month, day, &occ, 1) > 0;
 }
 
 void calendar_free_events(CalendarState* cal) {

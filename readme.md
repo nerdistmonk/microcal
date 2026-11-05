@@ -101,7 +101,7 @@ END:VCALENDAR
 
 ### Timed Events
 
-Timed events are exported with floating wall-clock time: `DTSTART:20261115T093000` with no `Z` suffix and no `TZID`. Viewers show them at the same clock time in whatever timezone they use. Microcal does not store a zone, so a timed event's zone is not kept on export. Multi-day all-day events are exported with an exclusive `DTEND`, and every day they cover is shown in Microcal.
+Each timed event keeps its own zone. An imported event keeps the `TZID` of its `DTSTART` (or `UTC` for a `Z` time), and its recurrence is expanded in that zone, so a weekly 09:00 New York event still shows at 09:00 New York time across daylight-saving changes. Microcal shows the times in your local timezone. Export writes `DTSTART;TZID=<zone>:...`. Floating times stay floating only when the machine's zone cannot be determined; otherwise they are written with this machine's zone. UTC times are written with `Z`. Export does not write a `VTIMEZONE` component, so strict RFC 5545 clients may not resolve a `TZID` that is not a standard IANA name. Multi-day all-day events are exported with an exclusive `DTEND`, and every day they cover is shown in Microcal.
 
 In the side panel and day view, a timed event shows as `HH:MM` or `HH:MM-HH:MM`, with ` +N day(s)` added when the end falls on a later day. A timed event that runs past midnight is listed on its start day only. The day view lists all-day events first, then timed events by start time. Events with the same start keep their stored order.
 
@@ -114,12 +114,14 @@ In the side panel and day view, a timed event shows as `HH:MM` or `HH:MM-HH:MM`,
 - **Sub-daily frequencies** (`HOURLY`, `MINUTELY`, `SECONDLY`) are imported as `DAILY`.
 - **Durations:** `DURATION` is used when `DTEND` is absent.
 - **Alarms:** `VALARM` blocks are skipped, so they cannot overwrite the event's `SUMMARY` or `DESCRIPTION`.
-- **Timed events** keep their start and optional end time. Times with a `Z` suffix (UTC) or a `TZID` are converted to your local timezone on import, so the event shows at the same moment. The zone is then lost, because export writes floating time. A `TZID` is looked up in `/usr/share/zoneinfo`. If the zone is unknown or that database is missing, the clock digits are kept as written.
+- **Timed events** keep their start and optional end time, together with their zone. A `TZID` is looked up in `/usr/share/zoneinfo`. A `Z` time is kept as UTC. If the zone is unknown or that database is missing, the clock digits are kept as floating time.
+- **Zone order:** `DTSTART` must come before `DTEND`, `RRULE`, `EXDATE`, `RDATE`, and `RECURRENCE-ID` in each event. These properties are read in the start event's zone, so a file that lists them earlier may get the wrong times.
 - **Durations:** A `DURATION` on a zoned start (`Z` or a known `TZID`) adds the exact elapsed time, so the end stays correct across daylight-saving changes. On a floating start it adds wall-clock time, as RFC 5545 specifies.
 - **Overrides:** A `RECURRENCE-ID` event is imported under the UID `base#YYYYMMDD`. On export it is written as a standalone event, and the master event gets an `EXDATE` for that day.
 - **EXDATE and RDATE** match by date only, after the same conversion as DTSTART. The time part is ignored.
+- **RECURRENCE-ID** is read in its own event's zone, which is treated as the master's zone.
 
-**Not supported** (these parts of a rule are ignored): `BYHOUR`, `BYMINUTE`, `BYSECOND`, `BYWEEKNO`, `BYYEARDAY`, `RANGE=THISANDFUTURE`, and `BYSETPOS` values beyond the first 8. `UNTIL` is compared by date only. A `Z` UNTIL is converted to local time first, then only its date is used.
+**Not supported** (these parts of a rule are ignored): `BYHOUR`, `BYMINUTE`, `BYSECOND`, `BYWEEKNO`, `BYYEARDAY`, `RANGE=THISANDFUTURE`, and `BYSETPOS` values beyond the first 8. `UNTIL` is compared by date only. A `Z` UNTIL is converted into the event's start zone first, then only its date is used.
 
 ---
 

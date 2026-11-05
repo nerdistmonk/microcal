@@ -255,7 +255,7 @@ int main(void) {
         case KEY_ENTER:
         case 'v':
         case 'V': {
-            Event* day_events[MAX_DAY_EVENTS];
+            EventOccurrence day_events[MAX_DAY_EVENTS];
             int count = calendar_get_events_for_day(&cal, cal.current_year, cal.current_month, cal.selected_day, day_events, MAX_DAY_EVENTS);
             int del_id = ui_show_day_events(&cal, day_events, count);
             if (del_id > 0) {
@@ -373,7 +373,7 @@ int main(void) {
                         cal.selected_day = clicked_day;
 
                         if (event.bstate & BUTTON1_DOUBLE_CLICKED) {
-                            Event* day_events[MAX_DAY_EVENTS];
+                            EventOccurrence day_events[MAX_DAY_EVENTS];
                             int count = calendar_get_events_for_day(&cal, cal.current_year, cal.current_month, cal.selected_day, day_events, MAX_DAY_EVENTS);
                             int del_id = ui_show_day_events(&cal, day_events, count);
                             if (del_id > 0) {

@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#include "zone.h"
+
 #define MAX_TITLE_LEN 128
 #define MAX_DESC_LEN 512
 #define MAX_UID_LEN 128
@@ -70,9 +72,13 @@ typedef struct Event {
     int end_year;
     int end_month;
     int end_day;
-    bool is_timed; // Has a time of day (floating local time); otherwise an all-day event
+    bool is_timed; // Has a time of day; otherwise an all-day event
     int start_minute; // 0-1439, when is_timed
     int end_minute; // 0-1439 when is_timed, -1 if the event has no end time
+    // Zone of the timed event's wall-clock fields (year..end_minute). Empty means floating (viewer's local time).
+    // A zoned event recurs in its own zone, so its occurrences keep their wall-clock time across DST changes.
+    char zone[MAX_ZONE_LEN];
+    long long zone_span; // Seconds from start to end instant, for a zoned event with an end time
     bool is_transparent; // TRANSP:TRANSPARENT vs OPAQUE
     int sequence; // SEQUENCE
     bool is_recurring;
@@ -108,14 +114,27 @@ Event* calendar_add_event_full(CalendarState* cal, const char* uid, const char* 
                                RecurrenceRule* rule);
 // Makes the event timed. end_minute is -1 for no end time; the end date is ignored in that case
 bool calendar_event_set_timed(Event* event, int start_minute, int end_year, int end_month, int end_day, int end_minute);
+// Marks a timed event as zoned: its wall-clock fields are in zone. span_seconds is the start-to-end duration
+// (ignored when the event has no end time). Returns false for an empty or overlong zone name.
+bool calendar_event_set_zone(Event* event, const char* zone, long long span_seconds);
 bool calendar_event_add_exdate(Event* event, int year, int month, int day);
 bool calendar_event_add_rdate(Event* event, int year, int month, int day);
 // Adds a YMD_KEY date to a list (no-op if present). Returns false on allocation failure
 bool date_list_add(DateList* list, int key);
 void date_list_free(DateList* list);
 bool calendar_delete_event(CalendarState* cal, int event_id);
+// One occurrence of an event on a viewer-local day. Times are viewer-local.
+typedef struct {
+    const Event* event;
+    int start_minute; // 0-1439 for a timed event
+    int end_minute; // 0-1439, or -1 if the occurrence has no end time
+    int end_days; // Days from the start date to the end date
+} EventOccurrence;
+
+// Fills out with the occurrences that start on the given viewer-local day, sorted: all-day, then by start time.
+// Returns the count (at most max_events).
 int calendar_get_events_for_day(const CalendarState* cal, int year, int month, int day,
-                                Event* out_events[], int max_events);
+                                EventOccurrence out[], int max_events);
 void calendar_free_events(CalendarState* cal);
 
 // Text copy that never splits a UTF-8 sequence; returns bytes copied
@@ -123,6 +142,9 @@ size_t copy_utf8_truncated(char* dst, size_t dst_size, const char* src);
 
 // Recurrence check
 bool event_occurs_on(const Event* event, int year, int month, int day);
+// Writes the occurrences of an event that start on the given viewer-local day. Returns the count (at most max_out)
+int calendar_event_occurrences_on(const Event* event, int year, int month, int day,
+                                  EventOccurrence out[], int max_out);
 // Bit for a BYDAY ordinal: +1..+5 -> bits 0..4, -1..-5 -> bits 5..9; 0 if out of range
 int recurrence_ordinal_bit(int nth);
 void calendar_next_day(int* year, int* month, int* day);

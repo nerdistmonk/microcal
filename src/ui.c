@@ -179,24 +179,19 @@ static size_t print_clipped(WINDOW* win, int y, int x, int max_bytes, const char
     return used;
 }
 
-// Time of day for a timed event: "HH:MM", "HH:MM-HH:MM", with " +N day(s)" if the end is on a later date.
-// Empty for all-day events.
-static void format_event_time(const Event* ev, char* out, size_t out_size) {
+// Time of day for an occurrence: "HH:MM", "HH:MM-HH:MM", with " +N day(s)" if the end is on a later date.
+// Empty for all-day events. Times are viewer-local, as the occurrence holds them.
+static void format_event_time(const EventOccurrence* occ, char* out, size_t out_size) {
     out[0] = '\0';
-    if (!ev->is_timed) return;
-    int start_h = ev->start_minute / 60;
-    int start_m = ev->start_minute % 60;
-    if (ev->end_minute < 0) {
+    if (!occ->event->is_timed) return;
+    int start_h = occ->start_minute / 60;
+    int start_m = occ->start_minute % 60;
+    if (occ->end_minute < 0) {
         snprintf(out, out_size, "%02d:%02d", start_h, start_m);
         return;
     }
-    int extra_days = 0;
-    int y = ev->year, m = ev->month, d = ev->day;
-    while (extra_days < 99 && YMD_KEY(y, m, d) < YMD_KEY(ev->end_year, ev->end_month, ev->end_day)) {
-        calendar_next_day(&y, &m, &d);
-        extra_days++;
-    }
-    snprintf(out, out_size, "%02d:%02d-%02d:%02d", start_h, start_m, ev->end_minute / 60, ev->end_minute % 60);
+    int extra_days = occ->end_days;
+    snprintf(out, out_size, "%02d:%02d-%02d:%02d", start_h, start_m, occ->end_minute / 60, occ->end_minute % 60);
     size_t used = strlen(out);
     if (extra_days == 1) {
         snprintf(out + used, out_size - used, " +1 day");
@@ -218,7 +213,7 @@ static void draw_side_event_panel(WINDOW* win, const CalendarState* cal, int win
     wattroff(win, A_BOLD);
     mvwhline(win, 2, 1, ACS_HLINE, win_w - 2);
 
-    Event* day_events[MAX_DAY_EVENTS];
+    EventOccurrence day_events[MAX_DAY_EVENTS];
     int count = calendar_get_events_for_day(cal, cal->current_year, cal->current_month, cal->selected_day, day_events, MAX_DAY_EVENTS);
 
     if (count == 0) {
@@ -235,22 +230,22 @@ static void draw_side_event_panel(WINDOW* win, const CalendarState* cal, int win
             }
 
             char when[48];
-            format_event_time(day_events[i], when, sizeof(when));
+            format_event_time(&day_events[i], when, sizeof(when));
             char item_line[MAX_TITLE_LEN + 64];
-            snprintf(item_line, sizeof(item_line), "- %s%s%s", when, when[0] ? " " : "", day_events[i]->title);
+            snprintf(item_line, sizeof(item_line), "- %s%s%s", when, when[0] ? " " : "", day_events[i].event->title);
 
             wattron(win, COLOR_PAIR(1) | A_BOLD);
             print_clipped(win, cur_line++, 2, max_w, item_line, true);
             wattroff(win, COLOR_PAIR(1) | A_BOLD);
 
-            if (g_detailed_view && strlen(day_events[i]->category) > 0 && cur_line < win_h - 2) {
+            if (g_detailed_view && strlen(day_events[i].event->category) > 0 && cur_line < win_h - 2) {
                 char type_line[MAX_CATEGORY_LEN + 8];
-                snprintf(type_line, sizeof(type_line), "Type: %s", day_events[i]->category);
+                snprintf(type_line, sizeof(type_line), "Type: %s", day_events[i].event->category);
                 print_clipped(win, cur_line++, 4, max_w - 4, type_line, true);
             }
 
-            if (strlen(day_events[i]->description) > 0) {
-                const char* p = day_events[i]->description;
+            if (strlen(day_events[i].event->description) > 0) {
+                const char* p = day_events[i].event->description;
                 while (*p && cur_line < win_h - 2) {
                     char desc_buf[MAX_DESC_LEN];
                     const char* next_nl = strchr(p, '\n');
@@ -656,11 +651,11 @@ static bool day_window_geometry(int content_lines, int count, int* w, int* h, in
     return true;
 }
 
-int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
+int ui_show_day_events(const CalendarState* cal, const EventOccurrence events[], int count) {
     int total_content_lines = 0;
     for (int i = 0; i < count; i++) {
         total_content_lines += 1;
-        total_content_lines += count_desc_lines(events[i]->description);
+        total_content_lines += count_desc_lines(events[i].event->description);
         total_content_lines += 1;
     }
 
@@ -723,13 +718,13 @@ int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
         int curr_y = 0;
         for (int i = 0; i < count; i++) {
             item_start_y[i] = curr_y;
-            curr_y += 1 + count_desc_lines(events[i]->description) + 1;
+            curr_y += 1 + count_desc_lines(events[i].event->description) + 1;
         }
 
         if (item_start_y[selected_idx] < scroll_offset) {
             scroll_offset = item_start_y[selected_idx];
         }
-        int sel_end_y = item_start_y[selected_idx] + 1 + count_desc_lines(events[selected_idx]->description);
+        int sel_end_y = item_start_y[selected_idx] + 1 + count_desc_lines(events[selected_idx].event->description);
         if (sel_end_y - scroll_offset > viewable_height) {
             scroll_offset = sel_end_y - viewable_height;
         }
@@ -740,16 +735,16 @@ int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
 
             if (base_screen_y >= 2 && base_screen_y < win_h - 2) {
                 char when[48];
-                format_event_time(events[i], when, sizeof(when));
+                format_event_time(&events[i], when, sizeof(when));
                 char label[MAX_TITLE_LEN + 64];
-                snprintf(label, sizeof(label), "%s%s%s", when, when[0] ? "  " : "", events[i]->title);
+                snprintf(label, sizeof(label), "%s%s%s", when, when[0] ? "  " : "", events[i].event->title);
                 if (i == selected_idx) wattron(win, A_REVERSE | A_BOLD);
                 print_clipped(win, base_screen_y, 3, max_text_w - 3, label, true);
                 if (i == selected_idx) wattroff(win, A_REVERSE | A_BOLD);
             }
 
-            if (strlen(events[i]->description) > 0) {
-                const char* p = events[i]->description;
+            if (strlen(events[i].event->description) > 0) {
+                const char* p = events[i].event->description;
                 int desc_line_idx = 0;
                 while (*p) {
                     char desc_buf[MAX_DESC_LEN];
@@ -785,8 +780,8 @@ int ui_show_day_events(const CalendarState* cal, Event* events[], int count) {
         case 'd':
         case 'D':
         case KEY_DC:
-            if (ui_confirm_delete(events[selected_idx]->title)) {
-                to_delete_id = events[selected_idx]->id;
+            if (ui_confirm_delete(events[selected_idx].event->title)) {
+                to_delete_id = events[selected_idx].event->id;
                 done = true;
             } else {
                 touchwin(stdscr);
