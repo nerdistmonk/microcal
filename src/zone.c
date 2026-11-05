@@ -122,3 +122,100 @@ bool zone_local_name(char* out, size_t size) {
     strcpy(out, name);
     return true;
 }
+
+// Days from 1970-01-01 to the given civil date (proleptic Gregorian calendar)
+static long long days_from_civil(long long y, int m, int d) {
+    y -= m <= 2;
+    long long era = (y >= 0 ? y : y - 399) / 400;
+    long long yoe = y - era * 400;
+    long long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+// Changes closer together than this are not detected
+#define OFFSET_SAMPLE_SECONDS 21600
+
+// Reads the offset state at an instant. The zone must already be entered.
+static bool offset_state_at(time_t instant, ZoneOffset* state) {
+    struct tm tm;
+    if (localtime_r(&instant, &tm) == NULL) return false;
+    long long local = days_from_civil(tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday) * 86400LL
+                    + tm.tm_hour * 3600LL + tm.tm_min * 60LL + tm.tm_sec;
+    state->instant = instant;
+    state->offset = (long)(local - (long long)instant);
+    state->is_dst = tm.tm_isdst > 0;
+    return true;
+}
+
+static bool same_offset_state(const ZoneOffset* a, const ZoneOffset* b) {
+    return a->offset == b->offset && a->is_dst == b->is_dst;
+}
+
+// Finds the first instant in (from.instant, to.instant] where the state differs from from's, by bisection
+static bool find_offset_change(const ZoneOffset* from, time_t to_instant, ZoneOffset* change) {
+    time_t lo = from->instant;
+    time_t hi = to_instant;
+    while (hi - lo > 1) {
+        time_t mid = lo + (hi - lo) / 2;
+        ZoneOffset probe;
+        if (!offset_state_at(mid, &probe)) return false;
+        if (same_offset_state(&probe, from)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return offset_state_at(hi, change);
+}
+
+ZoneOffset* zone_offset_states(const char* zone, int from_year, int to_year, size_t* count) {
+    *count = 0;
+    char* saved;
+    if (!enter_zone(zone, &saved)) return NULL;
+
+    time_t start = (time_t)(days_from_civil(from_year, 1, 1) * 86400LL);
+    time_t end = (time_t)(days_from_civil((long long)to_year + 1, 1, 1) * 86400LL) - 1;
+
+    size_t capacity = 64;
+    size_t n = 0;
+    ZoneOffset* states = malloc(capacity * sizeof(*states));
+    ZoneOffset current;
+    bool ok = states != NULL && offset_state_at(start, &current);
+    if (ok) {
+        states[n++] = current;
+    }
+
+    time_t t = start;
+    while (ok && t < end) {
+        time_t next = end - t > OFFSET_SAMPLE_SECONDS ? t + OFFSET_SAMPLE_SECONDS : end;
+        ZoneOffset probe;
+        ok = offset_state_at(next, &probe);
+        if (ok && !same_offset_state(&probe, &current)) {
+            ZoneOffset change;
+            ok = find_offset_change(&current, next, &change);
+            if (ok && n == capacity) {
+                ZoneOffset* grown = realloc(states, capacity * 2 * sizeof(*states));
+                if (grown == NULL) {
+                    ok = false;
+                } else {
+                    states = grown;
+                    capacity *= 2;
+                }
+            }
+            if (ok) {
+                states[n++] = change;
+                current = change;
+            }
+        }
+        t = next;
+    }
+
+    leave_zone(saved);
+    if (!ok) {
+        free(states);
+        return NULL;
+    }
+    *count = n;
+    return states;
+}

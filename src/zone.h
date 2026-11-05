@@ -20,4 +20,15 @@ bool zone_wall_clock(time_t instant, const char* zone, int* y, int* m, int* d, i
 // Names the viewer's own zone (from TZ or /etc/localtime) so it can be written as a TZID. Returns false if unnamed.
 bool zone_local_name(char* out, size_t size);
 
+// A zone's UTC offset from an instant until the next entry
+typedef struct {
+    time_t instant;
+    long offset; // Seconds east of UTC
+    bool is_dst;
+} ZoneOffset;
+
+// Lists a zone's offset states from January 1 of from_year to December 31 of to_year. The first entry is the state at
+// the start and each later entry is a change. Returns a malloc'd array that the caller frees, or NULL on failure.
+ZoneOffset* zone_offset_states(const char* zone, int from_year, int to_year, size_t* count);
+
 #endif // ZONE_H

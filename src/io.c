@@ -652,6 +652,34 @@ static bool pending_exclusions_add(PendingExclusions* list, const char* uid, int
     return true;
 }
 
+// Growable list of owned strings: deferred property lines of one event, and zone names when exporting
+typedef struct {
+    char** items;
+    size_t count;
+    size_t capacity;
+} StringList;
+
+static bool string_list_add(StringList* list, const char* line) {
+    if (list->count == list->capacity) {
+        size_t new_capacity = list->capacity ? list->capacity * 2 : 8;
+        char** grown = realloc(list->items, new_capacity * sizeof(*grown));
+        if (!grown) return false;
+        list->items = grown;
+        list->capacity = new_capacity;
+    }
+    size_t len = strlen(line);
+    char* copy = malloc(len + 1);
+    if (!copy) return false;
+    memcpy(copy, line, len + 1);
+    list->items[list->count++] = copy;
+    return true;
+}
+
+static void string_list_clear(StringList* list) {
+    for (size_t i = 0; i < list->count; i++) free(list->items[i]);
+    list->count = 0;
+}
+
 bool calendar_import_ics(CalendarState* cal, const char* filepath) {
     FILE* file = fopen(filepath, "r");
     if (!file) return false;
@@ -682,6 +710,8 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
     DateList exdates = {NULL, 0, 0};
     DateList rdates = {NULL, 0, 0};
     PendingExclusions pending = {NULL, 0, 0};
+    // DTEND, EXDATE, RDATE, RECURRENCE-ID, and RRULE depend on the start's zone, so they are read at END:VEVENT
+    StringList later = {NULL, 0, 0};
     RecurrenceRule rule;
     memset(&rule, 0, sizeof(RecurrenceRule));
     rule.wkst = -1;
@@ -734,6 +764,7 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
                 has_recid = false; recid_key = 0;
                 date_list_free(&exdates);
                 date_list_free(&rdates);
+                string_list_clear(&later);
                 in_alarm = false;
                 memset(&rule, 0, sizeof(RecurrenceRule));
                 rule.interval = 1;
@@ -744,6 +775,41 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
             }
             else if (strcmp(line, "END:VEVENT") == 0) {
                 if (in_event) {
+                    // Read now, so the start's zone is known whatever the property order
+                    for (size_t i = 0; i < later.count; i++) {
+                        char* prop = later.items[i];
+                        char* val = find_property_value_start(prop);
+                        if (!val) continue;
+                        char zone[MAX_ZONE_LEN];
+                        const char* tzid = property_tzid(prop, val, zone, sizeof(zone));
+                        int y = 0, m = 0, d = 0, minute = 0;
+                        bool has_time = false;
+                        if (strncmp(prop, "DTEND", 5) == 0) {
+                            if (parse_ics_value(val, tzid, start_zone, &y, &m, &d, &has_time, &minute)) {
+                                end_y = y;
+                                end_m = m;
+                                end_d = d;
+                                end_timed = has_time;
+                                end_minute = minute;
+                            }
+                        }
+                        else if (strncmp(prop, "EXDATE", 6) == 0) {
+                            add_ics_date_values(&exdates, val, tzid, start_zone);
+                        }
+                        else if (strncmp(prop, "RDATE", 5) == 0) {
+                            add_ics_date_values(&rdates, val, tzid, start_zone);
+                        }
+                        else if (strncmp(prop, "RECURRENCE-ID", 13) == 0) {
+                            has_recid = true;
+                            recid_key = parse_ics_value(val, tzid, start_zone, &y, &m, &d, &has_time, &minute)
+                                            ? YMD_KEY(y, m, d) : 0;
+                        }
+                        else if (strncmp(prop, "RRULE:", 6) == 0) {
+                            parse_rrule(prop, &rule, start_zone);
+                        }
+                    }
+                    string_list_clear(&later);
+
                     // RFC 5545 §3.3.10: If FREQ=WEEKLY has no BYDAY, default to DTSTART weekday.
                     // Evaluated here so start_y/m/d is guaranteed fully parsed regardless of line ordering.
                     if (rule.type == RECUR_WEEKLY && rule.day_of_week_mask == 0 &&
@@ -937,50 +1003,16 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
                         }
                     }
                 }
-                else if (strncmp(line, "DTEND", 5) == 0) {
-                    char* val = find_property_value_start(line);
-                    if (val) {
-                        int y = 0, m = 0, d = 0, minute = 0;
-                        bool has_time = false;
-                        char zone[MAX_ZONE_LEN];
-                        const char* tzid = property_tzid(line, val, zone, sizeof(zone));
-                        if (parse_ics_value(val, tzid, start_zone, &y, &m, &d, &has_time, &minute)) {
-                            end_y = y;
-                            end_m = m;
-                            end_d = d;
-                            end_timed = has_time;
-                            end_minute = minute;
-                        }
-                    }
-                }
                 else if (strncmp(line, "DURATION", 8) == 0) {
                     char* val = find_property_value_start(line);
                     if (val && parse_duration_seconds(val, &duration_seconds)) {
                         has_duration = true;
                     }
                 }
-                else if (strncmp(line, "EXDATE", 6) == 0) {
-                    char* val = find_property_value_start(line);
-                    char zone[MAX_ZONE_LEN];
-                    if (val) add_ics_date_values(&exdates, val, property_tzid(line, val, zone, sizeof(zone)), start_zone);
-                }
-                else if (strncmp(line, "RDATE", 5) == 0) {
-                    char* val = find_property_value_start(line);
-                    char zone[MAX_ZONE_LEN];
-                    if (val) add_ics_date_values(&rdates, val, property_tzid(line, val, zone, sizeof(zone)), start_zone);
-                }
-                else if (strncmp(line, "RECURRENCE-ID", 13) == 0) {
-                    char* val = find_property_value_start(line);
-                    has_recid = true;
-                    int y = 0, m = 0, d = 0, minute = 0;
-                    bool has_time = false;
-                    char zone[MAX_ZONE_LEN];
-                    const char* tzid = val ? property_tzid(line, val, zone, sizeof(zone)) : NULL;
-                    recid_key = (val && parse_ics_value(val, tzid, start_zone, &y, &m, &d, &has_time, &minute))
-                                    ? YMD_KEY(y, m, d) : 0;
-                }
-                else if (strncmp(line, "RRULE:", 6) == 0) {
-                    parse_rrule(line, &rule, start_zone);
+                else if (strncmp(line, "DTEND", 5) == 0 || strncmp(line, "EXDATE", 6) == 0 ||
+                         strncmp(line, "RDATE", 5) == 0 || strncmp(line, "RECURRENCE-ID", 13) == 0 ||
+                         strncmp(line, "RRULE:", 6) == 0) {
+                    if (!string_list_add(&later, line)) ok = false;
                 }
             }
         }
@@ -998,6 +1030,8 @@ bool calendar_import_ics(CalendarState* cal, const char* filepath) {
         }
     }
     free(pending.items);
+    string_list_clear(&later);
+    free(later.items);
     date_list_free(&exdates);
     date_list_free(&rdates);
     uid_set_free(&seen);
@@ -1026,6 +1060,88 @@ static void write_date_list(FILE* file, const char* name, const Event* ev, const
     }
 }
 
+// Writes a UTC offset as +HHMM, or +HHMMSS when it has seconds
+static void format_utc_offset(char* out, size_t size, long offset) {
+    char sign = offset < 0 ? '-' : '+';
+    long magnitude = offset < 0 ? -offset : offset;
+    if (magnitude % 60 == 0) {
+        snprintf(out, size, "%c%02ld%02ld", sign, magnitude / 3600, (magnitude % 3600) / 60);
+    } else {
+        snprintf(out, size, "%c%02ld%02ld%02ld", sign, magnitude / 3600, (magnitude % 3600) / 60, magnitude % 60);
+    }
+}
+
+// Writes an instant as a local DATE-TIME (no zone) in the given UTC offset
+static void write_local_datetime(FILE* file, const char* name, time_t instant, long offset) {
+    time_t local = instant + offset;
+    struct tm* wall = gmtime(&local);
+    if (wall == NULL) return;
+    fprintf(file, "%s:%04d%02d%02dT%02d%02d%02d\r\n", name, wall->tm_year + 1900, wall->tm_mon + 1, wall->tm_mday,
+            wall->tm_hour, wall->tm_min, wall->tm_sec);
+}
+
+// Offset that the state at index i changes from: the previous state's offset, or its own for the first state
+static long observance_from(const ZoneOffset* states, size_t i) {
+    return i == 0 ? states[0].offset : states[i - 1].offset;
+}
+
+// True when the states at i and k are changes into the same observance (same kind, same offsets)
+static bool same_observance(const ZoneOffset* states, size_t i, size_t k) {
+    return states[i].is_dst == states[k].is_dst && states[i].offset == states[k].offset &&
+           observance_from(states, i) == observance_from(states, k);
+}
+
+// Writes STANDARD and DAYLIGHT observances. Each distinct observance starts at its first change (DTSTART) and lists
+// its later changes as RDATE.
+static void write_zone_observances(FILE* file, const ZoneOffset* states, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        bool written = false;
+        for (size_t j = 0; j < i && !written; j++) {
+            written = same_observance(states, j, i);
+        }
+        if (written) continue;
+
+        long from = observance_from(states, i);
+        char from_text[32];
+        char to_text[32];
+        format_utc_offset(from_text, sizeof(from_text), from);
+        format_utc_offset(to_text, sizeof(to_text), states[i].offset);
+        const char* kind = states[i].is_dst ? "DAYLIGHT" : "STANDARD";
+
+        fprintf(file, "BEGIN:%s\r\n", kind);
+        write_local_datetime(file, "DTSTART", states[i].instant, from);
+        fprintf(file, "TZOFFSETFROM:%s\r\n", from_text);
+        fprintf(file, "TZOFFSETTO:%s\r\n", to_text);
+        for (size_t k = i + 1; k < count; k++) {
+            if (same_observance(states, i, k)) write_local_datetime(file, "RDATE", states[k].instant, from);
+        }
+        fprintf(file, "END:%s\r\n", kind);
+    }
+}
+
+// Writes a VTIMEZONE for zone, covering from_year through to_year
+static void write_timezone(FILE* file, const char* zone, int from_year, int to_year) {
+    size_t count = 0;
+    ZoneOffset* states = zone_offset_states(zone, from_year, to_year, &count);
+    if (states == NULL) return;
+    fprintf(file, "BEGIN:VTIMEZONE\r\nTZID:%s\r\n", zone);
+    write_zone_observances(file, states, count);
+    fprintf(file, "END:VTIMEZONE\r\n");
+    free(states);
+}
+
+// Widens the VTIMEZONE year range so it includes year, with a year of margin on each side
+static void include_year(int* from_year, int* to_year, int year) {
+    if (year - 1 < *from_year) *from_year = year - 1;
+    if (year + 1 > *to_year) *to_year = year + 1;
+}
+
+static void include_date_list_years(int* from_year, int* to_year, const DateList* list) {
+    for (int i = 0; i < list->count; i++) {
+        include_year(from_year, to_year, list->items[i] / 10000);
+    }
+}
+
 bool calendar_export_ics(const CalendarState* cal, const char* filepath) {
     char clean_path[512];
     strncpy(clean_path, filepath, sizeof(clean_path) - 5);
@@ -1050,6 +1166,32 @@ bool calendar_export_ics(const CalendarState* cal, const char* filepath) {
     // Floating timed events are written in this machine's zone, so each timed value names its zone
     char local_zone[MAX_ZONE_LEN];
     bool has_local_zone = zone_local_name(local_zone, sizeof(local_zone));
+
+    // Each zone used by a timed event gets a VTIMEZONE covering the years the events touch
+    StringList zones = {NULL, 0, 0};
+    int from_year = 1970;
+    int to_year = 2037;
+    for (const Event* ev = cal->events_head; ev != NULL; ev = ev->next) {
+        if (!ev->is_timed) continue;
+        include_year(&from_year, &to_year, ev->year);
+        if (ev->end_year > 0) include_year(&from_year, &to_year, ev->end_year);
+        include_date_list_years(&from_year, &to_year, &ev->exdates);
+        include_date_list_years(&from_year, &to_year, &ev->rdates);
+        if (ev->recurrence.has_until) include_year(&from_year, &to_year, ev->recurrence.until_year);
+
+        const char* zone = ev->zone[0] != '\0' ? ev->zone : (has_local_zone ? local_zone : "");
+        if (zone[0] == '\0' || strcmp(zone, "UTC") == 0 || !zone_is_known(zone)) continue;
+        bool listed = false;
+        for (size_t i = 0; i < zones.count && !listed; i++) {
+            listed = strcmp(zones.items[i], zone) == 0;
+        }
+        if (!listed && !string_list_add(&zones, zone)) break;
+    }
+    for (size_t i = 0; i < zones.count; i++) {
+        write_timezone(file, zones.items[i], from_year, to_year);
+    }
+    string_list_clear(&zones);
+    free(zones.items);
 
     Event* current = cal->events_head;
     while (current != NULL) {
